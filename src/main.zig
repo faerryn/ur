@@ -78,7 +78,7 @@ fn list(allocator: std.mem.Allocator, stdout: *std.io.Writer, stderr: *std.io.Wr
             }
         },
         .installed => {
-            const dir = try std.fs.cwd().openDir(".", .{.iterate=true});
+            const dir = try std.fs.cwd().openDir(".", .{ .iterate = true });
             var dir_it = dir.iterate();
             dir_loop: while (try dir_it.next()) |entry| {
                 if (entry.kind != .directory) {
