@@ -154,10 +154,11 @@ fn install() !void {
     }
     const index = try ur.Index.singleton();
     var version_spec: ur.VersionSpecs = undefined;
-    if (index.versions.get(args[2])) |value| {
+    const version = args[2];
+    if (index.versions.get(version)) |value| {
         version_spec = value;
     } else {
-        try stderr.print("Error: no zig version named '{s}'\n", .{args[2]});
+        try stderr.print("Error: no zig version named '{s}'\n", .{version});
         return;
     }
 
@@ -170,12 +171,12 @@ fn install() !void {
     if (version_spec.targets.get(target)) |value| {
         target_specs = value;
     } else {
-        try stderr.print("Error: zig version '{s}' does not support architecture '{s}'\n", .{ args[2], target });
+        try stderr.print("Error: zig version '{s}' does not support architecture '{s}'\n", .{ version, target });
         return;
     }
-    try stdout.print("Installing zig {s} for {s}...\n", .{ args[2], target });
+    try stdout.print("Installing zig {s} for {s}...\n", .{ version, target });
     try stdout.flush();
-    try install_target_spec(target_specs);
+    try install_target_spec(version, target_specs);
 }
 
 fn shim() !void {
@@ -183,13 +184,13 @@ fn shim() !void {
     var args_shift: usize = 2;
     version_block: {
         if (args.len > 2) {
-            try stdout.print("{s}\n", .{args[2]});
-            try stdout.flush();
-            if (std.SemanticVersion.parse(args[2])) |_| {
+            if (std.mem.eql(u8, "master", args[2]) or
+                if (std.SemanticVersion.parse(args[2])) |_| true else |_| false)
+            {
                 version = args[2];
                 args_shift += 1;
                 break :version_block;
-            } else |_| {}
+            }
         }
         if (std.fs.cwd().openFile("build.zig.zon", .{})) |file| {
             defer file.close();
@@ -203,17 +204,18 @@ fn shim() !void {
             version = zon.minimum_zig_version;
             break :version_block;
         } else |err| {
-            if (err != error.FileNotFound) {
+            if (err == error.FileNotFound) {
+                const index = try ur.Index.singleton();
+                version = index.versions.keys()[1];
+            } else {
                 return err;
             }
         }
-        const index = try ur.Index.singleton();
-        version = index.versions.keys()[1];
     }
-    var zig_location: std.ArrayList(u8) = .empty;
-    try zig_location.print(allocator, "zig-{s}-{s}", .{ ur.NATIVE_TARGET, version });
+    var zig_dir_name: std.ArrayList(u8) = .empty;
+    try zig_dir_name.print(allocator, "zig-{s}-{s}", .{ ur.NATIVE_TARGET, version });
     var zig_dir: std.fs.Dir = undefined;
-    if (data_dir.openDir(zig_location.items, .{})) |value| {
+    if (data_dir.openDir(zig_dir_name.items, .{})) |value| {
         zig_dir = value;
     } else |err| {
         if (err != error.FileNotFound) {
@@ -236,8 +238,8 @@ fn shim() !void {
         }
         try stdout.print("Installing zig {s} for {s}...\n", .{ version, ur.NATIVE_TARGET });
         try stdout.flush();
-        try install_target_spec(target_specs);
-        zig_dir = try data_dir.openDir(zig_location.items, .{});
+        try install_target_spec(version, target_specs);
+        zig_dir = try data_dir.openDir(zig_dir_name.items, .{});
     }
     var buffer: [std.fs.max_path_bytes]u8 = undefined;
     const zig_exe = try zig_dir.realpath(if (builtin.os.tag == .windows) "zig.exe" else "zig", &buffer);
@@ -259,7 +261,17 @@ fn shim() !void {
     }
 }
 
-fn install_target_spec(target_spec: ur.TargetSpecs) !void {
+fn install_target_spec(version: []const u8, target_spec: ur.TargetSpecs) !void {
+    var zig_dir_name: std.ArrayList(u8) = .empty;
+    try zig_dir_name.print(allocator, "zig-{s}-{s}", .{ ur.NATIVE_TARGET, version });
+    if (data_dir.access(zig_dir_name.items, .{})) |_| {
+        return;
+    } else |err| {
+        if (err != error.FileNotFound) {
+            return err;
+        }
+    }
+
     const FileType = enum { zip, tar_xz };
     var filetype: FileType = undefined;
     if (std.ascii.endsWithIgnoreCase(target_spec.tarball, ".zip")) {
@@ -269,40 +281,66 @@ fn install_target_spec(target_spec: ur.TargetSpecs) !void {
     } else {
         return error.UnsupportedFileType;
     }
-    var it = std.mem.splitBackwardsScalar(u8, target_spec.tarball, '/');
-    const filename = it.next().?;
+    var filename = try zig_dir_name.clone(allocator);
+    switch (filetype) {
+        .zip => try filename.print(allocator, ".zip", .{}),
+        .tar_xz => try filename.print(allocator, ".tar.xz", .{}),
+    }
     var file: std.fs.File = undefined;
     var download = true;
-    if (cache_dir.createFile(filename, .{ .read = true, .exclusive = true })) |value| {
+    if (cache_dir.createFile(filename.items, .{ .read = true, .exclusive = true })) |value| {
         file = value;
     } else |err| {
         if (err != error.PathAlreadyExists) {
             return err;
         }
-        file = try cache_dir.openFile(filename, .{});
+        file = try cache_dir.openFile(filename.items, .{});
         download = false;
     }
     defer file.close();
     errdefer file.close();
-    var buffer: [1024 * 16]u8 = undefined; // NOTE: std.zip and std.tar break on small buffer sizes for some reason?
+    // NOTE: std.zip and std.tar break on small buffer sizes for some reason?
+    var buffer: [@max(std.fs.max_path_bytes, 1024 * 16)]u8 = undefined;
     if (download) {
-        errdefer cache_dir.deleteFile(filename) catch {};
+        errdefer cache_dir.deleteFile(filename.items) catch {};
         var writer = file.writer(&buffer);
         const compressed_bytes = try ur.http_get(allocator, target_spec.tarball);
         try writer.interface.writeAll(compressed_bytes);
         try writer.interface.flush();
     }
+    data_dir.makeDir(zig_dir_name.items) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+    const zig_dir = try data_dir.openDir(zig_dir_name.items, .{ .iterate = true });
     switch (filetype) {
         .zip => {
             var file_reader = file.reader(&buffer);
-            try std.zip.extract(data_dir, &file_reader, .{});
+            try std.zip.extract(zig_dir, &file_reader, .{});
         },
         .tar_xz => {
             const file_reader = file.deprecatedReader();
             var decompress = try std.compress.xz.decompress(allocator, file_reader);
             const decompress_reader = decompress.reader();
             var decompress_adapter = decompress_reader.adaptToNewApi(&buffer);
-            try std.tar.pipeToFileSystem(data_dir, &decompress_adapter.new_interface, .{});
+            try std.tar.pipeToFileSystem(zig_dir, &decompress_adapter.new_interface, .{});
         },
+    }
+    var dir_it = zig_dir.iterate();
+    var entries: std.ArrayList(std.fs.Dir.Entry) = .empty;
+    while (try dir_it.next()) |entry| {
+        try entries.append(allocator, entry);
+    }
+    if (entries.items.len == 1 and
+        entries.items[0].kind == .directory)
+    {
+        const single_dir = try zig_dir.openDir(entries.items[0].name, .{ .iterate = true });
+        dir_it = single_dir.iterate();
+        const zig_path = try zig_dir.realpathAlloc(allocator, ".");
+        while (try dir_it.next()) |entry| {
+            const old = try single_dir.realpath(entry.name, &buffer);
+            const new = try std.fs.path.join(allocator, &[_][]const u8{ zig_path, entry.name });
+            try std.fs.renameAbsolute(old, new);
+        }
     }
 }
