@@ -1,7 +1,7 @@
 A zig version manager, written in zig.
 
 ```
-Usage: ./zig-out/bin/ur [COMMAND] [<ARGS>]
+Usage: ur [COMMAND] [<ARGS>]
 
 Commands:
   help                              Display this help message.
