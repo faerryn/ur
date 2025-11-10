@@ -131,6 +131,7 @@ fn install(allocator: std.mem.Allocator, stdout: *std.io.Writer, stderr: *std.io
         return;
     }
     try stdout.print("Installing zig {s} for {s}...\n", .{ args[2], target });
+    try stdout.flush();
     try target_specs.install(allocator);
 }
 
@@ -150,6 +151,16 @@ fn shim(allocator: std.mem.Allocator, stdout: *std.io.Writer, stderr: *std.io.Wr
     } else |err| {
         if (err != error.FileNotFound) {
             return err;
+        }
+        version_block: {
+            if (args.len > 3) {
+                if (std.SemanticVersion.parse(args[3])) |_| {
+                    version = args[3];
+                    break :version_block;
+                } else |_| {}
+            }
+            const index = try ur.Index.singleton();
+            version = index.versions.keys()[1];
         }
     }
     var zig_location: std.ArrayList(u8) = .empty;
@@ -173,10 +184,11 @@ fn shim(allocator: std.mem.Allocator, stdout: *std.io.Writer, stderr: *std.io.Wr
         if (version_spec.targets.get(ur.NATIVE_TARGET)) |value| {
             target_specs = value;
         } else {
-            try stderr.print("Error: zig version '{s}' does not support architecture '{s}'\n", .{ args[2], ur.NATIVE_TARGET });
+            try stderr.print("Error: zig version '{s}' does not support architecture '{s}'\n", .{ version, ur.NATIVE_TARGET });
             return;
         }
-        try stdout.print("Installing zig {s} for {s}...\n", .{ args[2], ur.NATIVE_TARGET });
+        try stdout.print("Installing zig {s} for {s}...\n", .{ version, ur.NATIVE_TARGET });
+        try stdout.flush();
         try target_specs.install(allocator);
         zig_dir = try dir.openDir(zig_location.items, .{});
     }
