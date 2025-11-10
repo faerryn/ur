@@ -1,0 +1,6 @@
+zig-out/
+.zig-cache/
+
+*.zip
+*.tar.xz
+zig-*/
