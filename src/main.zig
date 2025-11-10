@@ -138,30 +138,35 @@ fn install(allocator: std.mem.Allocator, stdout: *std.io.Writer, stderr: *std.io
 fn shim(allocator: std.mem.Allocator, stdout: *std.io.Writer, stderr: *std.io.Writer, args: [][:0]u8) !void {
     const dir = std.fs.cwd();
     var version: []const u8 = undefined;
-    if (dir.openFile("build.zig.zon", .{})) |file| {
-        defer file.close();
-        const stat = try file.stat();
-        var buffer: [1024]u8 = undefined;
-        var reader = file.reader(&buffer);
-        var source = try allocator.alloc(u8, stat.size + 1);
-        @memset(source, 0);
-        try reader.interface.readSliceAll(source[0..stat.size]);
-        const zon = try std.zon.parse.fromSlice(struct { minimum_zig_version: []const u8 }, allocator, source[0..stat.size :0], null, .{ .ignore_unknown_fields = true });
-        version = zon.minimum_zig_version;
-    } else |err| {
-        if (err != error.FileNotFound) {
-            return err;
+    var args_shift: usize = 2;
+    version_block: {
+        if (args.len > 2) {
+            try stdout.print("{s}\n", .{args[2]});
+            try stdout.flush();
+            if (std.SemanticVersion.parse(args[2])) |_| {
+                version = args[2];
+                args_shift += 1;
+                break :version_block;
+            } else |_| {}
         }
-        version_block: {
-            if (args.len > 3) {
-                if (std.SemanticVersion.parse(args[3])) |_| {
-                    version = args[3];
-                    break :version_block;
-                } else |_| {}
+        if (dir.openFile("build.zig.zon", .{})) |file| {
+            defer file.close();
+            const stat = try file.stat();
+            var buffer: [1024]u8 = undefined;
+            var reader = file.reader(&buffer);
+            var source = try allocator.alloc(u8, stat.size + 1);
+            @memset(source, 0);
+            try reader.interface.readSliceAll(source[0..stat.size]);
+            const zon = try std.zon.parse.fromSlice(struct { minimum_zig_version: []const u8 }, allocator, source[0..stat.size :0], null, .{ .ignore_unknown_fields = true });
+            version = zon.minimum_zig_version;
+            break :version_block;
+        } else |err| {
+            if (err != error.FileNotFound) {
+                return err;
             }
-            const index = try ur.Index.singleton();
-            version = index.versions.keys()[1];
         }
+        const index = try ur.Index.singleton();
+        version = index.versions.keys()[1];
     }
     var zig_location: std.ArrayList(u8) = .empty;
     try zig_location.print(allocator, "zig-{s}-{s}", .{ ur.NATIVE_TARGET, version });
@@ -196,7 +201,7 @@ fn shim(allocator: std.mem.Allocator, stdout: *std.io.Writer, stderr: *std.io.Wr
     const zig_exe = try zig_dir.realpath(if (builtin.os.tag == .windows) "zig.exe" else "zig", &buffer);
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.append(allocator, zig_exe);
-    for (args[2..]) |arg| {
+    for (args[args_shift..]) |arg| {
         try argv.append(allocator, arg);
     }
     try stdout.flush();
@@ -205,7 +210,8 @@ fn shim(allocator: std.mem.Allocator, stdout: *std.io.Writer, stderr: *std.io.Wr
         return std.process.execv(allocator, argv.items);
     } else if (std.process.can_spawn) {
         var child = std.process.Child.init(argv.items, allocator);
-        try child.spawn();
+        const term = try child.spawnAndWait();
+        return std.process.exit(term.Exited);
     } else {
         try stderr.print("Error: no mechanism to run {s}!\n", .{zig_exe});
     }
