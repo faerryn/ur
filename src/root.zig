@@ -55,60 +55,9 @@ pub const TargetSpecs = struct {
     tarball: []const u8,
     shasum: []const u8,
     size: usize,
-
-    pub fn install(self: @This(), allocator: std.mem.Allocator) !void {
-        const FileType = enum { zip, tar_xz };
-        var filetype: FileType = undefined;
-        if (std.ascii.endsWithIgnoreCase(self.tarball, ".zip")) {
-            filetype = .zip;
-        } else if (std.ascii.endsWithIgnoreCase(self.tarball, ".tar.xz")) {
-            filetype = .tar_xz;
-        } else {
-            return error.UnsupportedFileType;
-        }
-        var it = std.mem.splitBackwardsScalar(u8, self.tarball, '/');
-        const filename = it.next().?;
-        var file: std.fs.File = undefined;
-        var download = true;
-
-        const dir = std.fs.cwd();
-
-        if (dir.createFile(filename, .{ .read = true, .exclusive = true })) |value| {
-            file = value;
-        } else |err| {
-            if (err != error.PathAlreadyExists) {
-                return err;
-            }
-            file = try dir.openFile(filename, .{});
-            download = false;
-        }
-        defer file.close();
-        errdefer file.close();
-        var buffer: [1024 * 16]u8 = undefined; // NOTE: std.zip and std.tar break on small buffer sizes for some reason?
-        if (download) {
-            errdefer dir.deleteFile(filename) catch {};
-            var writer = file.writer(&buffer);
-            const compressed_bytes = try http_get(allocator, self.tarball);
-            try writer.interface.writeAll(compressed_bytes);
-            try writer.interface.flush();
-        }
-        switch (filetype) {
-            .zip => {
-                var file_reader = file.reader(&buffer);
-                try std.zip.extract(dir, &file_reader, .{});
-            },
-            .tar_xz => {
-                const file_reader = file.deprecatedReader();
-                var decompress = try std.compress.xz.decompress(allocator, file_reader);
-                const decompress_reader = decompress.reader();
-                var decompress_adapter = decompress_reader.adaptToNewApi(&buffer);
-                try std.tar.pipeToFileSystem(dir, &decompress_adapter.new_interface, .{});
-            },
-        }
-    }
 };
 
-fn http_get(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
+pub fn http_get(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
     var client = std.http.Client{ .allocator = allocator };
     var writer = std.io.Writer.Allocating.init(allocator);
     const result = try client.fetch(.{
