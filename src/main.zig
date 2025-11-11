@@ -122,29 +122,38 @@ fn list() !void {
             }
         },
         .installed => {
-            var dir_it = data_dir.iterate();
-            dir_loop: while (try dir_it.next()) |entry| {
-                if (entry.kind != .directory) {
-                    continue;
-                }
-                var name_it = std.mem.splitScalar(u8, entry.name, '-');
-                var pieces: std.ArrayList([]const u8) = .empty;
-                while (name_it.next()) |piece| {
-                    if (piece.len == 0) {
-                        continue :dir_loop;
-                    }
-                    try pieces.append(allocator, piece);
-                }
-                if (pieces.items.len != 4) {
-                    continue;
-                }
-                if (!std.mem.eql(u8, "zig", pieces.items[0])) {
-                    continue;
-                }
-                try stdout.print("{s}\n", .{pieces.items[3]});
+            const versions = try list_installed_versions();
+            for (versions.items) |version| {
+                try stdout.print("{s}\n", .{version});
             }
         },
     }
+}
+
+fn list_installed_versions() !std.ArrayList([]const u8) {
+    var versions: std.ArrayList([]const u8) = .empty;
+    var dir_it = data_dir.iterate();
+    dir_loop: while (try dir_it.next()) |entry| {
+        if (entry.kind != .directory) {
+            continue;
+        }
+        var name_it = std.mem.splitScalar(u8, entry.name, '-');
+        var pieces: std.ArrayList([]const u8) = .empty;
+        while (name_it.next()) |piece| {
+            if (piece.len == 0) {
+                continue :dir_loop;
+            }
+            try pieces.append(allocator, piece);
+        }
+        if (pieces.items.len != 4) {
+            continue;
+        }
+        if (!std.mem.eql(u8, "zig", pieces.items[0])) {
+            continue;
+        }
+        try versions.append(allocator, try allocator.dupe(u8, pieces.items[3]));
+    }
+    return versions;
 }
 
 fn install() !void {
@@ -183,6 +192,7 @@ fn shim() !void {
     var version: []const u8 = undefined;
     var args_shift: usize = 2;
     version_block: {
+        // Check if VERSION is specified
         if (args.len > 2) {
             if (std.mem.eql(u8, "master", args[2]) or
                 if (std.SemanticVersion.parse(args[2])) |_| true else |_| false)
@@ -192,6 +202,7 @@ fn shim() !void {
                 break :version_block;
             }
         }
+        // Check if build.zig.zon specifies version
         if (std.fs.cwd().openFile("build.zig.zon", .{})) |file| {
             defer file.close();
             const stat = try file.stat();
@@ -204,13 +215,32 @@ fn shim() !void {
             version = zon.minimum_zig_version;
             break :version_block;
         } else |err| {
-            if (err == error.FileNotFound) {
-                const index = try ur.Index.singleton();
-                version = index.versions.keys()[1];
-            } else {
+            if (err != error.FileNotFound) {
                 return err;
             }
         }
+        // Check for latest installed version
+        const installed_versions = try list_installed_versions();
+        if (installed_versions.items.len > 0) {
+            version = installed_versions.items[0];
+            for (installed_versions.items[1..]) |installed_version| {
+                if (std.mem.eql(u8, "master", version)) {
+                    version = installed_version;
+                } else if (std.mem.eql(u8, "master", installed_version)) {
+                    continue;
+                } else {
+                    const old = try std.SemanticVersion.parse(version);
+                    const new = try std.SemanticVersion.parse(installed_version);
+                    if (std.SemanticVersion.order(old, new) == .lt) {
+                        version = installed_version;
+                    }
+                }
+            }
+            break :version_block;
+        }
+        // Check online for latest tagged version
+        const index = try ur.Index.singleton();
+        version = index.versions.keys()[1];
     }
     var zig_dir_name: std.ArrayList(u8) = .empty;
     try zig_dir_name.print(allocator, "zig-{s}-{s}", .{ ur.NATIVE_TARGET, version });
