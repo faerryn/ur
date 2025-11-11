@@ -93,7 +93,7 @@ fn help(writer: *std.io.Writer) !void {
         \\  install [VERSION]                 Install VERSION for your architecture.
         \\  list (*available|all|installed)?  List versions for your architecture; or all versions regardless of architecture; or installed versions only.
         \\  zig (VERSION)? [<ARGS>]           Run zig with [<ARGS>], parsing build.zig.zon for the version. Override with VERSION.
-        \\  version                           Print the version of {s}
+        \\  version                           Print the version of {s}.
         \\
     , .{ args[0], config.name });
 }
