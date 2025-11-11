@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const ur = @import("ur");
+const config = @import("config");
 
 var stdout: *std.io.Writer = undefined;
 var stderr: *std.io.Writer = undefined;
@@ -65,7 +66,7 @@ pub fn main() !void {
     const data_path = try home.realpath(data_subpath, &buffer);
     data_dir = try std.fs.openDirAbsolute(data_path, .{ .iterate = true });
 
-    const Subcommand = enum { help, list, install, zig };
+    const Subcommand = enum { help, list, install, zig, version };
     const subcommand: ?Subcommand = if (args.len > 1) std.meta.stringToEnum(Subcommand, args[1]) else null;
 
     if (subcommand) |value| {
@@ -74,6 +75,7 @@ pub fn main() !void {
             .list => try list(),
             .install => try install(),
             .zig => try shim(),
+            .version => try print_version(),
         }
     } else {
         try help(stderr);
@@ -88,11 +90,16 @@ fn help(writer: *std.io.Writer) !void {
         \\
         \\Commands:
         \\  help                              Display this help message.
-        \\  install [VERSION] (TARGET)?       Install VERSION for your architecture, or for TARGET.
-        \\  list (*available|all|installed)?  List versions for your architecture; or all zig versions; or installed zig versions.
+        \\  install [VERSION]                 Install VERSION for your architecture.
+        \\  list (*available|all|installed)?  List versions for your architecture; or all versions regardless of architecture; or installed versions only.
         \\  zig (VERSION)? [<ARGS>]           Run zig with [<ARGS>], parsing build.zig.zon for the version. Override with VERSION.
+        \\  version                           Print the version of {s}
         \\
-    , .{args[0]});
+    , .{ args[0], config.name });
+}
+
+fn print_version() !void {
+    try stdout.print("{s} {s}\n", .{ config.name, config.version });
 }
 
 fn list() !void {
@@ -171,19 +178,11 @@ fn install() !void {
         return;
     }
 
-    var target: []const u8 = ur.NATIVE_TARGET;
-    if (args.len > 3) {
-        target = args[3];
-    }
-
-    var target_specs: ur.TargetSpecs = undefined;
-    if (version_spec.targets.get(target)) |value| {
-        target_specs = value;
-    } else {
-        try stderr.print("Error: zig version '{s}' does not support architecture '{s}'\n", .{ version, target });
+    const target_specs: ur.TargetSpecs = version_spec.targets.get(ur.NATIVE_TARGET) orelse {
+        try stderr.print("Error: zig version '{s}' does not support architecture '{s}'\n", .{ version, ur.NATIVE_TARGET });
         return;
-    }
-    try stdout.print("Installing zig {s} for {s}...\n", .{ version, target });
+    };
+    try stdout.print("Installing zig {s} for {s}...\n", .{ version, ur.NATIVE_TARGET });
     try stdout.flush();
     try install_target_spec(version, target_specs);
 }
