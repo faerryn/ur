@@ -210,9 +210,14 @@ fn shim() !void {
             var source = try allocator.alloc(u8, stat.size + 1);
             @memset(source, 0);
             try reader.interface.readSliceAll(source[0..stat.size]);
-            const zon = try std.zon.parse.fromSlice(struct { minimum_zig_version: []const u8 }, allocator, source[0..stat.size :0], null, .{ .ignore_unknown_fields = true });
-            version = zon.minimum_zig_version;
-            break :version_block;
+            if (std.zon.parse.fromSlice(struct { minimum_zig_version: []const u8 }, allocator, source[0..stat.size :0], null, .{ .ignore_unknown_fields = true })) |zon| {
+                version = zon.minimum_zig_version;
+                break :version_block;
+            } else |err| {
+                if (err != error.ParseZon) {
+                    return err;
+                }
+            }
         } else |err| {
             if (err != error.FileNotFound) {
                 return err;
