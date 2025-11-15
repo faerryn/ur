@@ -10,6 +10,6 @@ Commands:
   zig (VERSION)? [<ARGS>]           Run zig with [<ARGS>], parsing build.zig.zon for the version. Override with VERSION.
 ```
 
-A ziggarat, probably not written in zig.
+A ziggurat, probably not written in zig.
 
 <img width="3366" height="1468" alt="image" src="https://github.com/user-attachments/assets/9e64e9b4-be0a-49b2-854c-68197bcae7b8" />
