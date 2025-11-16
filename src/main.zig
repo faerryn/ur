@@ -14,13 +14,13 @@ var cache_dir: std.fs.Dir = undefined;
 var data_dir: std.fs.Dir = undefined;
 
 pub fn main() !void {
-    var stdout_buffer: [1024]u8 = undefined;
+    var stdout_buffer = std.mem.zeroes([1024]u8);
     const stdout_file = std.fs.File.stdout();
     var stdout_writer = stdout_file.writer(&stdout_buffer);
     stdout = &stdout_writer.interface;
     defer stdout.flush() catch {};
 
-    var stderr_buffer: [1024]u8 = undefined;
+    var stderr_buffer = std.mem.zeroes([1024]u8);
     const stderr_file = std.fs.File.stderr();
     var stderr_writer = stderr_file.writer(&stderr_buffer);
     stderr = &stderr_writer.interface;
@@ -33,57 +33,48 @@ pub fn main() !void {
     args = try std.process.argsAlloc(allocator);
 
     const envmap = try std.process.getEnvMap(allocator);
-    var root_path_env_name: []const u8 = undefined;
-    var cache_subpath: []const u8 = undefined;
-    var data_subpath: []const u8 = undefined;
-    switch (builtin.os.tag) {
-        .macos, .linux => {
-            root_path_env_name = "HOME";
-            cache_subpath = ".cache/ur";
-            data_subpath = ".local/share/ur";
-        },
-        .windows => {
-            root_path_env_name = "LOCALAPPDATA";
-            cache_subpath = "ur/cache";
-            data_subpath = "ur/zig";
-        },
-        else => @compileError("Unsupported OS: " ++ @tagName(builtin.os.tag)),
-    }
+    const parent_path_env_name, const cache_subpath, const data_subpath =
+        switch (builtin.os.tag) {
+            .macos, .linux => .{ "HOME", ".cache/ur", ".local/share/ur" },
+            .windows => .{
+                "LOCALAPPDATA",
+                "ur/cache",
+                "ur/zig",
+            },
+            else => @compileError("Unsupported OS: " ++ @tagName(builtin.os.tag)),
+        };
 
-    const home_path = envmap.get(root_path_env_name) orelse return error.BadEnvironment;
-    const home = try std.fs.openDirAbsolute(home_path, .{});
-    home.makePath(cache_subpath) catch |err| switch (err) {
+    const parent_path = envmap.get(parent_path_env_name) orelse return error.BadEnvironment;
+    const parent_dir = try std.fs.openDirAbsolute(parent_path, .{});
+    parent_dir.makePath(cache_subpath) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
-    home.makePath(data_subpath) catch |err| switch (err) {
+    parent_dir.makePath(data_subpath) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
-    var buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const cache_path = try home.realpath(cache_subpath, &buffer);
+    var buffer = std.mem.zeroes([std.fs.max_path_bytes]u8);
+    const cache_path = try parent_dir.realpath(cache_subpath, &buffer);
     cache_dir = try std.fs.openDirAbsolute(cache_path, .{});
-    const data_path = try home.realpath(data_subpath, &buffer);
+    const data_path = try parent_dir.realpath(data_subpath, &buffer);
     data_dir = try std.fs.openDirAbsolute(data_path, .{ .iterate = true });
 
     const Subcommand = enum { help, list, install, zig, version };
-    const subcommand: ?Subcommand = if (args.len > 1) std.meta.stringToEnum(Subcommand, args[1]) else null;
-
-    if (subcommand) |value| {
-        switch (value) {
-            .help => try help(stdout),
-            .list => try list(),
-            .install => try install(),
-            .zig => try shim(),
-            .version => try print_version(),
-        }
-    } else {
-        try help(stderr);
+    switch (if (args.len > 1)
+        std.meta.stringToEnum(Subcommand, args[1]) orelse .help
+    else
+        .zig) {
+        .help => try help(),
+        .list => try list(),
+        .install => try install(),
+        .zig => try shim(),
+        .version => try print_version(),
     }
 }
 
-fn help(writer: *std.io.Writer) !void {
-    try writer.print(
+fn help() !void {
+    try stdout.print(
         \\A zig version manager, written in zig.
         \\
         \\Usage: {s} [COMMAND] [<ARGS>]
@@ -103,27 +94,27 @@ fn print_version() !void {
 }
 
 fn list() !void {
-    const Subcommand = enum { available, all, installed };
-    var subcommand: Subcommand = undefined;
-    if (args.len > 2) {
-        if (std.meta.stringToEnum(Subcommand, args[2])) |value| {
-            subcommand = value;
-        } else {
-            try help(stderr);
-            return;
-        }
-    } else {
-        subcommand = .available;
-    }
+    const Subcommand = enum { available, all, installed, help };
 
-    switch (subcommand) {
-        .available, .all => {
+    switch (if (args.len > 2)
+        std.meta.stringToEnum(Subcommand, args[2]) orelse .help
+    else
+        .available) {
+        .all => {
+            const index = try ur.Index.singleton();
+            var it = index.versions.iterator();
+            while (it.next()) |kv| {
+                const version = kv.key_ptr.*;
+                try stdout.print("{s}\n", .{version});
+            }
+        },
+        .available => {
             const index = try ur.Index.singleton();
             var it = index.versions.iterator();
             while (it.next()) |kv| {
                 const version = kv.key_ptr.*;
                 const version_spec = kv.value_ptr;
-                if (subcommand == Subcommand.all or version_spec.targets.get(ur.NATIVE_TARGET) != null) {
+                if (version_spec.targets.get(ur.NATIVE_TARGET) != null) {
                     try stdout.print("{s}\n", .{version});
                 }
             }
@@ -134,6 +125,7 @@ fn list() !void {
                 try stdout.print("{s}\n", .{version});
             }
         },
+        .help => try help(),
     }
 }
 
@@ -165,18 +157,16 @@ fn list_installed_versions() !std.ArrayList([]const u8) {
 
 fn install() !void {
     if (args.len < 3) {
-        try help(stderr);
+        try help();
         return;
     }
     const index = try ur.Index.singleton();
-    var version_spec: ur.VersionSpecs = undefined;
     const version = args[2];
-    if (index.versions.get(version)) |value| {
-        version_spec = value;
-    } else {
-        try stderr.print("Error: no zig version named '{s}'\n", .{version});
-        return;
-    }
+    const version_spec: ur.VersionSpecs = index.versions.get(version) orelse
+        {
+            try stderr.print("Error: no zig version named '{s}'\n", .{version});
+            return;
+        };
 
     const target_specs: ur.TargetSpecs = version_spec.targets.get(ur.NATIVE_TARGET) orelse {
         try stderr.print("Error: zig version '{s}' does not support architecture '{s}'\n", .{ version, ur.NATIVE_TARGET });
@@ -188,94 +178,85 @@ fn install() !void {
 }
 
 fn shim() !void {
-    var version: []const u8 = undefined;
     var args_shift: usize = 2;
-    version_block: {
-        // Check if VERSION is specified
-        if (args.len > 2) {
-            if (std.mem.eql(u8, "master", args[2]) or
-                if (std.SemanticVersion.parse(args[2])) |_| true else |_| false)
-            {
-                version = args[2];
-                args_shift += 1;
-                break :version_block;
+    const version: []const u8 =
+        version_block: {
+            // Check if VERSION is specified
+            if (args.len > 2) {
+                if (std.mem.eql(u8, "master", args[2]) or
+                    if (std.SemanticVersion.parse(args[2])) |_| true else |_| false)
+                {
+                    args_shift += 1;
+                    break :version_block args[2];
+                }
             }
-        }
-        // Check if build.zig.zon specifies version
-        if (std.fs.cwd().openFile("build.zig.zon", .{})) |file| {
-            defer file.close();
-            const stat = try file.stat();
-            var buffer: [1024]u8 = undefined;
-            var reader = file.reader(&buffer);
-            var source = try allocator.alloc(u8, stat.size + 1);
-            @memset(source, 0);
-            try reader.interface.readSliceAll(source[0..stat.size]);
-            if (std.zon.parse.fromSlice(struct { minimum_zig_version: []const u8 }, allocator, source[0..stat.size :0], null, .{ .ignore_unknown_fields = true })) |zon| {
-                version = zon.minimum_zig_version;
-                break :version_block;
+            // Check if build.zig.zon specifies version
+            // TODO: check parent directories for build.zig.zon
+            if (std.fs.cwd().openFile("build.zig.zon", .{})) |file| {
+                defer file.close();
+                const stat = try file.stat();
+                var buffer = std.mem.zeroes([1024]u8);
+                var reader = file.reader(&buffer);
+                var source = try allocator.alloc(u8, stat.size + 1);
+                @memset(source, 0);
+                try reader.interface.readSliceAll(source[0..stat.size]);
+                if (std.zon.parse.fromSlice(struct { minimum_zig_version: []const u8 }, allocator, source[0..stat.size :0], null, .{ .ignore_unknown_fields = true })) |zon| {
+                    break :version_block zon.minimum_zig_version;
+                } else |err| {
+                    if (err != error.ParseZon) {
+                        return err;
+                    }
+                }
             } else |err| {
-                if (err != error.ParseZon) {
+                if (err != error.FileNotFound) {
                     return err;
                 }
             }
-        } else |err| {
-            if (err != error.FileNotFound) {
-                return err;
-            }
-        }
-        // Check for latest installed version
-        const installed_versions = try list_installed_versions();
-        if (installed_versions.items.len > 0) {
-            version = installed_versions.items[0];
-            for (installed_versions.items[1..]) |installed_version| {
-                if (std.mem.eql(u8, "master", version)) {
-                    version = installed_version;
-                } else if (std.mem.eql(u8, "master", installed_version)) {
-                    continue;
-                } else {
-                    const old = try std.SemanticVersion.parse(version);
-                    const new = try std.SemanticVersion.parse(installed_version);
-                    if (std.SemanticVersion.order(old, new) == .lt) {
-                        version = installed_version;
+            // Check for latest installed version
+            const installed_versions = try list_installed_versions();
+            if (installed_versions.items.len > 0) {
+                var candidate = installed_versions.items[0];
+                for (installed_versions.items[1..]) |installed_version| {
+                    if (std.mem.eql(u8, "master", candidate)) {
+                        candidate = installed_version;
+                    } else if (std.mem.eql(u8, "master", installed_version)) {
+                        continue;
+                    } else {
+                        const old = try std.SemanticVersion.parse(candidate);
+                        const new = try std.SemanticVersion.parse(installed_version);
+                        if (std.SemanticVersion.order(old, new) == .lt) {
+                            candidate = installed_version;
+                        }
                     }
                 }
+                break :version_block candidate;
             }
-            break :version_block;
-        }
-        // Check online for latest tagged version
-        const index = try ur.Index.singleton();
-        version = index.versions.keys()[1];
-    }
+            // Check online for latest tagged version
+            const index = try ur.Index.singleton();
+            break :version_block index.versions.keys()[1];
+        };
     var zig_dir_name: std.ArrayList(u8) = .empty;
     try zig_dir_name.print(allocator, "zig-{s}-{s}", .{ ur.NATIVE_TARGET, version });
-    var zig_dir: std.fs.Dir = undefined;
-    if (data_dir.openDir(zig_dir_name.items, .{})) |value| {
-        zig_dir = value;
-    } else |err| {
+    const zig_dir: std.fs.Dir = data_dir.openDir(zig_dir_name.items, .{}) catch |err| zig_dir_block: {
         if (err != error.FileNotFound) {
             return err;
         }
         const index = try ur.Index.singleton();
-        var version_spec: ur.VersionSpecs = undefined;
-        if (index.versions.get(version)) |value| {
-            version_spec = value;
-        } else {
+        var version_spec: ur.VersionSpecs = index.versions.get(version) orelse {
             try stderr.print("Error: no zig version named '{s}'\n", .{version});
             return;
-        }
-        var target_specs: ur.TargetSpecs = undefined;
-        if (version_spec.targets.get(ur.NATIVE_TARGET)) |value| {
-            target_specs = value;
-        } else {
-            try stderr.print("Error: zig version '{s}' does not support architecture '{s}'\n", .{ version, ur.NATIVE_TARGET });
-            return;
-        }
+        };
+        const target_specs: ur.TargetSpecs = version_spec.targets.get(ur.NATIVE_TARGET) orelse
+            {
+                try stderr.print("Error: zig version '{s}' does not support architecture '{s}'\n", .{ version, ur.NATIVE_TARGET });
+                return;
+            };
         try stdout.print("Installing zig {s} for {s}...\n", .{ version, ur.NATIVE_TARGET });
         try stdout.flush();
         try install_target_spec(version, target_specs);
-        zig_dir = try data_dir.openDir(zig_dir_name.items, .{});
-    }
-    var buffer: [std.fs.max_path_bytes]u8 = undefined;
+        break :zig_dir_block try data_dir.openDir(zig_dir_name.items, .{});
+    };
+    var buffer = std.mem.zeroes([std.fs.max_path_bytes]u8);
     const zig_exe = try zig_dir.realpath(if (builtin.os.tag == .windows) "zig.exe" else "zig", &buffer);
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.append(allocator, zig_exe);
@@ -307,34 +288,29 @@ fn install_target_spec(version: []const u8, target_spec: ur.TargetSpecs) !void {
     }
 
     const FileType = enum { zip, tar_xz };
-    var filetype: FileType = undefined;
-    if (std.ascii.endsWithIgnoreCase(target_spec.tarball, ".zip")) {
-        filetype = .zip;
-    } else if (std.ascii.endsWithIgnoreCase(target_spec.tarball, ".tar.xz")) {
-        filetype = .tar_xz;
-    } else {
-        return error.UnsupportedFileType;
-    }
+    const filetype: FileType =
+        if (std.ascii.endsWithIgnoreCase(target_spec.tarball, ".zip"))
+            .zip
+        else if (std.ascii.endsWithIgnoreCase(target_spec.tarball, ".tar.xz"))
+            .tar_xz
+        else
+            return error.UnsupportedFileType;
     var filename = try zig_dir_name.clone(allocator);
     switch (filetype) {
         .zip => try filename.print(allocator, ".zip", .{}),
         .tar_xz => try filename.print(allocator, ".tar.xz", .{}),
     }
-    var file: std.fs.File = undefined;
     var download = true;
-    if (cache_dir.createFile(filename.items, .{ .read = true, .exclusive = true })) |value| {
-        file = value;
-    } else |err| {
+    var file: std.fs.File = cache_dir.createFile(filename.items, .{ .read = true, .exclusive = true }) catch |err| file_block: {
         if (err != error.PathAlreadyExists) {
             return err;
         }
-        file = try cache_dir.openFile(filename.items, .{});
         download = false;
-    }
+        break :file_block try cache_dir.openFile(filename.items, .{});
+    };
     defer file.close();
     errdefer file.close();
-    // NOTE: std.zip and std.tar break on small buffer sizes for some reason?
-    var buffer: [@max(std.fs.max_path_bytes, 1024 * 16)]u8 = undefined;
+    var buffer = std.mem.zeroes([1024]u8);
     if (download) {
         errdefer cache_dir.deleteFile(filename.items) catch {};
         var writer = file.writer(&buffer);
@@ -371,8 +347,9 @@ fn install_target_spec(version: []const u8, target_spec: ur.TargetSpecs) !void {
         const single_dir = try zig_dir.openDir(entries.items[0].name, .{ .iterate = true });
         dir_it = single_dir.iterate();
         const zig_path = try zig_dir.realpathAlloc(allocator, ".");
+        var old_path_buffer = std.mem.zeroes([std.fs.max_path_bytes]u8);
         while (try dir_it.next()) |entry| {
-            const old = try single_dir.realpath(entry.name, &buffer);
+            const old = try single_dir.realpath(entry.name, &old_path_buffer);
             const new = try std.fs.path.join(allocator, &[_][]const u8{ zig_path, entry.name });
             try std.fs.renameAbsolute(old, new);
         }
