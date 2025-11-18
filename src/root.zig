@@ -236,102 +236,6 @@ pub fn openAppDir(allocator: std.mem.Allocator, known_folder: known_folders.Know
     return try std.fs.cwd().openDir(path, args);
 }
 
-pub fn install_remote_tarball(backing_allocator: std.mem.Allocator, spec: Spec, remote_tarball: RemoteTarball) !void {
-    var arena = std.heap.ArenaAllocator.init(backing_allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    var zig_dir_name: std.ArrayList(u8) = .empty;
-    try zig_dir_name.print(allocator, "{f}", .{spec});
-
-    const FileType = enum { zip, tar_xz };
-    const filetype: FileType =
-        if (std.ascii.endsWithIgnoreCase(remote_tarball.url, ".zip"))
-            .zip
-        else if (std.ascii.endsWithIgnoreCase(remote_tarball.url, ".tar.xz"))
-            .tar_xz
-        else
-            return error.UnsupportedFileType;
-    var filename = try zig_dir_name.clone(allocator);
-    switch (filetype) {
-        .zip => try filename.print(allocator, ".zip", .{}),
-        .tar_xz => try filename.print(allocator, ".tar.xz", .{}),
-    }
-    var tarball_dir = try openAppDir(allocator, .cache, .{});
-    defer tarball_dir.close();
-    var download = true;
-    var file: std.fs.File = tarball_dir.createFile(filename.items, .{ .read = true, .exclusive = true }) catch |err| file_block: {
-        if (err != error.PathAlreadyExists) return err;
-        download = false;
-        break :file_block try tarball_dir.openFile(filename.items, .{});
-    };
-    defer file.close();
-    var buffer = std.mem.zeroes([1024]u8);
-    if (download) {
-        errdefer tarball_dir.deleteFile(filename.items) catch {};
-        var writer = file.writer(&buffer);
-        const compressed_bytes = try http_get(allocator, remote_tarball.url);
-        try writer.interface.writeAll(compressed_bytes);
-        try writer.interface.flush();
-    }
-    var install_dir = try openAppDir(allocator, .data, .{});
-    defer install_dir.close();
-    try install_dir.makePath(zig_dir_name.items);
-    errdefer install_dir.deleteTree(zig_dir_name.items) catch {};
-    var zig_dir = try install_dir.openDir(zig_dir_name.items, .{ .iterate = true });
-    defer zig_dir.close();
-    switch (filetype) {
-        .zip => {
-            var file_reader = file.reader(&buffer);
-            try std.zip.extract(zig_dir, &file_reader, .{});
-        },
-        .tar_xz => {
-            const file_reader = file.deprecatedReader();
-            var decompress = try std.compress.xz.decompress(allocator, file_reader);
-            const decompress_reader = decompress.reader();
-            var decompress_adapter = decompress_reader.adaptToNewApi(&buffer);
-            try std.tar.pipeToFileSystem(zig_dir, &decompress_adapter.new_interface, .{});
-        },
-    }
-    var dir_it = zig_dir.iterate();
-    var entries: std.ArrayList(std.fs.Dir.Entry) = .empty;
-    while (try dir_it.next()) |entry| {
-        try entries.append(allocator, entry);
-    }
-    if (entries.items.len == 1 and
-        entries.items[0].kind == .directory)
-    {
-        var single_dir = try zig_dir.openDir(entries.items[0].name, .{ .iterate = true });
-        defer single_dir.close();
-        dir_it = single_dir.iterate();
-
-        var buffer1 = std.mem.zeroes([std.fs.max_path_bytes]u8);
-        var buffer2 = std.mem.zeroes([std.fs.max_path_bytes]u8);
-
-        const zig_path = try zig_dir.realpath(".", &buffer1);
-        while (try dir_it.next()) |entry| {
-            const old = try single_dir.realpath(entry.name, &buffer2);
-            const new = try std.fs.path.join(allocator, &[_][]const u8{ zig_path, entry.name });
-            try std.fs.renameAbsolute(old, new);
-        }
-    }
-}
-
-pub fn listInstalledSpecs(allocator: std.mem.Allocator) !std.ArrayList(Spec) {
-    var specs: std.ArrayList(Spec) = .empty;
-    var install_dir = try openAppDir(allocator, .data, .{ .iterate = true });
-    defer install_dir.close();
-    var dir_it = install_dir.iterate();
-    while (try dir_it.next()) |entry| {
-        if (entry.kind != .directory) {
-            continue;
-        }
-        const spec = Spec.parse(entry.name, .{}) catch continue;
-        try specs.append(allocator, spec);
-    }
-    return specs;
-}
-
 pub fn Tio(comptime out_buf_size: usize, comptime err_buf_size: usize) type {
     return struct {
         out_file: std.fs.File,
@@ -377,4 +281,151 @@ pub fn Tio(comptime out_buf_size: usize, comptime err_buf_size: usize) type {
 pub const TioInterface = struct {
     out: *std.io.Writer,
     err: *std.io.Writer,
+};
+
+pub fn findBuildVersion(allocator: std.mem.Allocator, dir: std.fs.Dir) !?Version {
+    if (dir.openFile("build.zig.zon", .{})) |file| {
+        defer file.close();
+        const stat = try file.stat();
+        var buffer = std.mem.zeroes([1024]u8);
+        var reader = file.reader(&buffer);
+        var source = try allocator.alloc(u8, stat.size + 1);
+        defer allocator.free(source);
+        @memset(source, 0);
+        try reader.interface.readSliceAll(source[0..stat.size]);
+        if (std.zon.parse.fromSlice(struct { minimum_zig_version: []const u8 }, allocator, source[0..stat.size :0], null, .{ .ignore_unknown_fields = true })) |zon| {
+            defer allocator.free(zon.minimum_zig_version);
+            if (Version.parse(zon.minimum_zig_version)) |version| {
+                return version;
+            } else |_| {}
+        } else |err| {
+            if (err != error.ParseZon) {
+                return err;
+            }
+        }
+    } else |err| {
+        if (err != error.FileNotFound) {
+            return err;
+        }
+    }
+
+    var parent = try dir.openDir("..", .{});
+    defer parent.close();
+    var buffer1 = std.mem.zeroes([std.fs.max_path_bytes]u8);
+    var buffer2 = std.mem.zeroes([std.fs.max_path_bytes]u8);
+    const dir_path = try dir.realpath(".", &buffer1);
+    const parent_path = try parent.realpath(".", &buffer2);
+    if (std.mem.eql(u8, dir_path, parent_path)) {
+        return null;
+    }
+    return try findBuildVersion(allocator, parent);
+}
+
+// Library of local zig installations
+pub const Library = struct {
+    install_dir: std.fs.Dir,
+    cache_dir: std.fs.Dir,
+
+    pub fn init(allocator: std.mem.Allocator) !@This() {
+        return .{
+            .install_dir = try openAppDir(allocator, .data, .{.iterate = true}),
+            .cache_dir = try openAppDir(allocator, .data, .{.iterate = true}),
+        };
+    }
+
+    pub fn deinit(self: *@This()) void {
+        self.install_dir.close();
+        self.cache_dir.close();
+    }
+
+    pub fn list(self: @This(), allocator: std.mem.Allocator) !std.ArrayList(Spec) {
+        var specs: std.ArrayList(Spec) = .empty;
+        var dir_it = self.install_dir.iterate();
+        while (try dir_it.next()) |entry| {
+            if (entry.kind != .directory) {
+                continue;
+            }
+            const spec = Spec.parse(entry.name, .{}) catch continue;
+            try specs.append(allocator, spec);
+        }
+        return specs;
+    }
+
+    pub fn install_remote_tarball(self: @This(), backing_allocator: std.mem.Allocator, spec: Spec, remote_tarball: RemoteTarball) !void {
+        var arena = std.heap.ArenaAllocator.init(backing_allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+
+        var zig_dir_name: std.ArrayList(u8) = .empty;
+        try zig_dir_name.print(allocator, "{f}", .{spec});
+
+        const FileType = enum { zip, tar_xz };
+        const filetype: FileType =
+            if (std.ascii.endsWithIgnoreCase(remote_tarball.url, ".zip"))
+                .zip
+            else if (std.ascii.endsWithIgnoreCase(remote_tarball.url, ".tar.xz"))
+                .tar_xz
+            else
+                return error.UnsupportedFileType;
+        var filename = try zig_dir_name.clone(allocator);
+        switch (filetype) {
+            .zip => try filename.print(allocator, ".zip", .{}),
+            .tar_xz => try filename.print(allocator, ".tar.xz", .{}),
+        }
+        var download = true;
+        var file: std.fs.File = self.cache_dir.createFile(filename.items, .{ .read = true, .exclusive = true }) catch |err| file_block: {
+            if (err != error.PathAlreadyExists) return err;
+            download = false;
+            break :file_block try self.cache_dir.openFile(filename.items, .{});
+        };
+        defer file.close();
+        var buffer = std.mem.zeroes([1024]u8);
+        if (download) {
+            errdefer self.cache_dir.deleteFile(filename.items) catch {};
+            var writer = file.writer(&buffer);
+            const compressed_bytes = try http_get(allocator, remote_tarball.url);
+            try writer.interface.writeAll(compressed_bytes);
+            try writer.interface.flush();
+        }
+        try self.install_dir.makePath(zig_dir_name.items);
+        errdefer self.install_dir.deleteTree(zig_dir_name.items) catch {};
+        var zig_dir = try self.install_dir.openDir(zig_dir_name.items, .{ .iterate = true });
+        defer zig_dir.close();
+        switch (filetype) {
+            .zip => {
+                var file_reader = file.reader(&buffer);
+                try std.zip.extract(zig_dir, &file_reader, .{});
+            },
+            .tar_xz => {
+                const file_reader = file.deprecatedReader();
+                var decompress = try std.compress.xz.decompress(allocator, file_reader);
+                const decompress_reader = decompress.reader();
+                var decompress_adapter = decompress_reader.adaptToNewApi(&buffer);
+                try std.tar.pipeToFileSystem(zig_dir, &decompress_adapter.new_interface, .{});
+            },
+        }
+        var dir_it = zig_dir.iterate();
+        var entries: std.ArrayList(std.fs.Dir.Entry) = .empty;
+        while (try dir_it.next()) |entry| {
+            try entries.append(allocator, entry);
+        }
+        if (entries.items.len == 1 and
+            entries.items[0].kind == .directory)
+        {
+            var single_dir = try zig_dir.openDir(entries.items[0].name, .{ .iterate = true });
+            defer single_dir.close();
+            dir_it = single_dir.iterate();
+
+            var buffer1 = std.mem.zeroes([std.fs.max_path_bytes]u8);
+            var buffer2 = std.mem.zeroes([std.fs.max_path_bytes]u8);
+
+            const zig_path = try zig_dir.realpath(".", &buffer1);
+            while (try dir_it.next()) |entry| {
+                const old = try single_dir.realpath(entry.name, &buffer2);
+                const new = try std.fs.path.join(allocator, &[_][]const u8{ zig_path, entry.name });
+                try std.fs.renameAbsolute(old, new);
+            }
+        }
+    }
+
 };

@@ -77,7 +77,9 @@ fn list(allocator: std.mem.Allocator, tio: ur.TioInterface, args: [][:0]u8) !voi
             try tio.out.flush();
         },
         .installed => {
-            var specs = try ur.listInstalledSpecs(allocator);
+            var library = try ur.Library.init(allocator);
+            defer library.deinit();
+            var specs = try library.list(allocator);
             defer specs.deinit(allocator);
             for (specs.items) |spec| {
                 try tio.out.print("{f}\n", .{spec});
@@ -94,7 +96,7 @@ fn install(allocator: std.mem.Allocator, tio: ur.TioInterface, args: [][:0]u8) !
                 return;
             };
         }
-        if (try findBuildVersion(allocator, std.fs.cwd())) |version| {
+        if (try ur.findBuildVersion(allocator, std.fs.cwd())) |version| {
             break :spec_block .{
                 .target = ur.Target.NATIVE,
                 .version = version,
@@ -115,45 +117,9 @@ fn install(allocator: std.mem.Allocator, tio: ur.TioInterface, args: [][:0]u8) !
     };
     try tio.out.print("Installing zig {f}...\n", .{spec});
     try tio.out.flush();
-    try ur.install_remote_tarball(allocator, spec, remote_tarball);
-}
-
-fn findBuildVersion(allocator: std.mem.Allocator, dir: std.fs.Dir) !?ur.Version {
-    if (dir.openFile("build.zig.zon", .{})) |file| {
-        defer file.close();
-        const stat = try file.stat();
-        var buffer = std.mem.zeroes([1024]u8);
-        var reader = file.reader(&buffer);
-        var source = try allocator.alloc(u8, stat.size + 1);
-        defer allocator.free(source);
-        @memset(source, 0);
-        try reader.interface.readSliceAll(source[0..stat.size]);
-        if (std.zon.parse.fromSlice(struct { minimum_zig_version: []const u8 }, allocator, source[0..stat.size :0], null, .{ .ignore_unknown_fields = true })) |zon| {
-            defer allocator.free(zon.minimum_zig_version);
-            if (ur.Version.parse(zon.minimum_zig_version)) |version| {
-                return version;
-            } else |_| {}
-        } else |err| {
-            if (err != error.ParseZon) {
-                return err;
-            }
-        }
-    } else |err| {
-        if (err != error.FileNotFound) {
-            return err;
-        }
-    }
-
-    var parent = try dir.openDir("..", .{});
-    defer parent.close();
-    var buffer1 = std.mem.zeroes([std.fs.max_path_bytes]u8);
-    var buffer2 = std.mem.zeroes([std.fs.max_path_bytes]u8);
-    const dir_path = try dir.realpath(".", &buffer1);
-    const parent_path = try parent.realpath(".", &buffer2);
-    if (std.mem.eql(u8, dir_path, parent_path)) {
-        return null;
-    }
-    return try findBuildVersion(allocator, parent);
+    var library = try ur.Library.init(allocator);
+    defer library.deinit();
+    try library.install_remote_tarball(allocator, spec, remote_tarball);
 }
 
 fn shim(allocator: std.mem.Allocator, tio: ur.TioInterface, parent_args: [][:0]u8) !void {
@@ -168,14 +134,16 @@ fn shim(allocator: std.mem.Allocator, tio: ur.TioInterface, parent_args: [][:0]u
                 } else |_| {}
             }
             // Check if build.zig.zon specifies version
-            if (try findBuildVersion(allocator, std.fs.cwd())) |version| {
+            if (try ur.findBuildVersion(allocator, std.fs.cwd())) |version| {
                 break :spec_block .{
                     .target = ur.Target.NATIVE,
                     .version = version,
                 };
             }
             // Check for latest installed version
-            var local_specs = try ur.listInstalledSpecs(allocator);
+            var library = try ur.Library.init(allocator);
+            defer library.deinit();
+            var local_specs = try library.list(allocator);
             defer local_specs.deinit(allocator);
             var latest_spec: ?ur.Spec = null;
             for (local_specs.items) |spec| {
