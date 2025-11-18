@@ -77,7 +77,7 @@ fn list(allocator: std.mem.Allocator, tio: ur.TioInterface, args: [][:0]u8) !voi
             try tio.out.flush();
         },
         .installed => {
-            var library = try ur.Library.init(allocator);
+            var library = try ur.Library.init();
             defer library.deinit();
             var specs = try library.list(allocator);
             defer specs.deinit(allocator);
@@ -90,7 +90,7 @@ fn list(allocator: std.mem.Allocator, tio: ur.TioInterface, args: [][:0]u8) !voi
 
 fn install(allocator: std.mem.Allocator, tio: ur.TioInterface, args: [][:0]u8) !void {
     const spec: ur.Spec = spec_block: {
-        if (args.len > 1) {
+        if (args.len > 0) {
             break :spec_block ur.Spec.parse(args[0], .{ .guess = true }) catch {
                 try tio.err.print("Error: could not parse '{s}'\n", .{args[0]});
                 return;
@@ -107,7 +107,20 @@ fn install(allocator: std.mem.Allocator, tio: ur.TioInterface, args: [][:0]u8) !
         return;
     };
 
-    // TODO: avoid reinstalling already installed versions of zig
+    try ensure_installed(allocator, tio, spec);
+}
+
+// TODO: use actual errors here to signify different return states
+fn ensure_installed(allocator: std.mem.Allocator, tio: ur.TioInterface, spec: ur.Spec) !void {
+    var library = try ur.Library.init();
+    defer library.deinit();
+    var zig_dir_eu = library.openZigDir(spec, .{});
+    if (zig_dir_eu) |*zig_dir| {
+        zig_dir.close();
+        return;
+    } else |err| {
+        if (err != error.FileNotFound) return err;
+    }
 
     var index = try ur.fetch_remote_index(allocator);
     defer index.deinit();
@@ -115,10 +128,9 @@ fn install(allocator: std.mem.Allocator, tio: ur.TioInterface, args: [][:0]u8) !
         try tio.err.print("Error: zig version '{f}' does not exist or not support architecture '{f}'\n", .{ spec.version, spec.target });
         return;
     };
-    try tio.out.print("Installing zig {f}...\n", .{spec});
+    try tio.out.print("Installing {f}...\n", .{spec});
     try tio.out.flush();
-    var library = try ur.Library.init(allocator);
-    defer library.deinit();
+
     try library.install_remote_tarball(allocator, spec, remote_tarball);
 }
 
@@ -141,7 +153,7 @@ fn shim(allocator: std.mem.Allocator, tio: ur.TioInterface, parent_args: [][:0]u
                 };
             }
             // Check for latest installed version
-            var library = try ur.Library.init(allocator);
+            var library = try ur.Library.init();
             defer library.deinit();
             var local_specs = try library.list(allocator);
             defer local_specs.deinit(allocator);
@@ -160,37 +172,31 @@ fn shim(allocator: std.mem.Allocator, tio: ur.TioInterface, parent_args: [][:0]u
             return error.Unimplemented;
         };
 
+    var library = try ur.Library.init();
+    defer library.deinit();
+
+    try ensure_installed(allocator, tio, spec);
+    var zig_dir = try library.openZigDir(spec, .{});
+    defer zig_dir.close();
+
     var buffer = std.mem.zeroes([std.fs.max_path_bytes]u8);
+    const zig_exe = try zig_dir.realpath(if (builtin.os.tag == .windows) "zig.exe" else "zig", &buffer);
+
     var argv: std.ArrayList([]u8) = .empty;
     defer argv.deinit(allocator);
-    {
-        var zig_dir_name: std.ArrayList(u8) = .empty;
-        defer zig_dir_name.deinit(allocator);
-        try zig_dir_name.print(allocator, "{f}", .{spec});
-        var install_dir = try ur.openAppDir(allocator, .data, .{});
-        defer install_dir.close();
-        var zig_dir: std.fs.Dir = install_dir.openDir(zig_dir_name.items, .{}) catch |err| {
-            if (err != error.FileNotFound) return err;
-            // TODO: Install zig as needed
-            try tio.out.print("Installing zig...\n", .{});
-            return error.Unimplemented;
-        };
-        defer zig_dir.close();
-        const zig_exe = try zig_dir.realpath(if (builtin.os.tag == .windows) "zig.exe" else "zig", &buffer);
-        try argv.append(allocator, zig_exe);
-    }
+    try argv.append(allocator, zig_exe);
     for (args) |arg| {
         try argv.append(allocator, arg);
     }
 
-    // Execv will prevent us from using GPA's memory leak detection
+    // Execv will prevent us from using GPA's memory leak detection, so we disable it on Debug
     if (std.process.can_execv and builtin.mode != .Debug) {
-        const err = std.process.execv(argv.allocator, argv.content);
-        argv.deinit();
-        return err;
+        return std.process.execv(allocator, argv.items);
     } else if (std.process.can_spawn) {
         var child = std.process.Child.init(argv.items, allocator);
-        _ = try child.spawnAndWait();
+        const term = try child.spawnAndWait();
+        // Exit on release with the appropriate exit code
+        if (builtin.mode != .Debug) std.process.exit(term.Exited);
     } else {
         @compileError("No shim mechanism!");
     }

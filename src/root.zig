@@ -220,14 +220,14 @@ pub fn http_get(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
     return try writer.toOwnedSlice();
 }
 
-pub fn getAppPath(allocator: std.mem.Allocator, known_folder: known_folders.KnownFolder) ![]const u8 {
+fn getAppPath(allocator: std.mem.Allocator, known_folder: known_folders.KnownFolder) ![]const u8 {
     const parent_path =
         try known_folders.getPath(std.Io{}, allocator, known_folder) orelse return error.NotFound;
     defer allocator.free(parent_path);
     const path_parts = &[_][]const u8{ parent_path, config.name };
     return try std.fs.path.join(allocator, path_parts);
 }
-pub fn openAppDir(allocator: std.mem.Allocator, known_folder: known_folders.KnownFolder, args: std.fs.Dir.OpenOptions) !std.fs.Dir {
+fn openAppDir(allocator: std.mem.Allocator, known_folder: known_folders.KnownFolder, args: std.fs.Dir.OpenOptions) !std.fs.Dir {
     const path = try getAppPath(allocator, known_folder);
     defer allocator.free(path);
     std.fs.cwd().makePath(path) catch |err| {
@@ -326,10 +326,13 @@ pub const Library = struct {
     install_dir: std.fs.Dir,
     cache_dir: std.fs.Dir,
 
-    pub fn init(allocator: std.mem.Allocator) !@This() {
+    pub fn init() !@This() {
+        var buffer = std.mem.zeroes([std.fs.max_path_bytes]u8);
+        var fba = std.heap.FixedBufferAllocator.init(&buffer);
+        const allocator = fba.allocator();
         return .{
-            .install_dir = try openAppDir(allocator, .data, .{.iterate = true}),
-            .cache_dir = try openAppDir(allocator, .data, .{.iterate = true}),
+            .install_dir = try openAppDir(allocator, .data, .{ .iterate = true }),
+            .cache_dir = try openAppDir(allocator, .cache, .{ .iterate = true }),
         };
     }
 
@@ -351,13 +354,25 @@ pub const Library = struct {
         return specs;
     }
 
-    pub fn install_remote_tarball(self: @This(), backing_allocator: std.mem.Allocator, spec: Spec, remote_tarball: RemoteTarball) !void {
-        var arena = std.heap.ArenaAllocator.init(backing_allocator);
-        defer arena.deinit();
-        const allocator = arena.allocator();
+    pub fn openZigDir(self: @This(), spec: Spec, args: std.fs.Dir.OpenOptions) !std.fs.Dir {
+        var zig_dir_name_buffer = std.mem.zeroes([std.fs.max_path_bytes]u8);
+        var zig_dir_name_writer = std.Io.Writer.fixed(&zig_dir_name_buffer);
+        try zig_dir_name_writer.print("{f}", .{spec});
+        const zig_dir_name = zig_dir_name_writer.buffered();
+        return try self.install_dir.openDir(zig_dir_name, args);
+    }
 
-        var zig_dir_name: std.ArrayList(u8) = .empty;
-        try zig_dir_name.print(allocator, "{f}", .{spec});
+    pub fn install_remote_tarball(self: @This(), allocator: std.mem.Allocator, spec: Spec, remote_tarball: RemoteTarball) !void {
+        var zig_dir_name_buffer = std.mem.zeroes([std.fs.max_path_bytes]u8);
+        var zig_dir_name_writer = std.Io.Writer.fixed(&zig_dir_name_buffer);
+        try zig_dir_name_writer.print("{f}", .{spec});
+        const zig_dir_name = zig_dir_name_writer.buffered();
+        // Exit if already installed
+        if (self.install_dir.access(zig_dir_name, .{})) {
+            return error.AlreadyInstalled;
+        } else |err| {
+            if (err != error.FileNotFound) return err;
+        }
 
         const FileType = enum { zip, tar_xz };
         const filetype: FileType =
@@ -367,29 +382,31 @@ pub const Library = struct {
                 .tar_xz
             else
                 return error.UnsupportedFileType;
-        var filename = try zig_dir_name.clone(allocator);
         switch (filetype) {
-            .zip => try filename.print(allocator, ".zip", .{}),
-            .tar_xz => try filename.print(allocator, ".tar.xz", .{}),
+            .zip => try zig_dir_name_writer.print(".zip", .{}),
+            .tar_xz => try zig_dir_name_writer.print(".tar.xz", .{}),
         }
+        const filename = zig_dir_name_writer.buffered();
         var download = true;
-        var file: std.fs.File = self.cache_dir.createFile(filename.items, .{ .read = true, .exclusive = true }) catch |err| file_block: {
+        var file: std.fs.File = self.cache_dir.createFile(filename, .{ .read = true, .exclusive = true }) catch |err| file_block: {
             if (err != error.PathAlreadyExists) return err;
             download = false;
-            break :file_block try self.cache_dir.openFile(filename.items, .{});
+            break :file_block try self.cache_dir.openFile(filename, .{});
         };
         defer file.close();
         var buffer = std.mem.zeroes([1024]u8);
         if (download) {
-            errdefer self.cache_dir.deleteFile(filename.items) catch {};
+            errdefer self.cache_dir.deleteFile(filename) catch {};
             var writer = file.writer(&buffer);
             const compressed_bytes = try http_get(allocator, remote_tarball.url);
+            defer allocator.free(compressed_bytes);
             try writer.interface.writeAll(compressed_bytes);
             try writer.interface.flush();
         }
-        try self.install_dir.makePath(zig_dir_name.items);
-        errdefer self.install_dir.deleteTree(zig_dir_name.items) catch {};
-        var zig_dir = try self.install_dir.openDir(zig_dir_name.items, .{ .iterate = true });
+
+        try self.install_dir.makePath(zig_dir_name);
+        errdefer self.install_dir.deleteTree(zig_dir_name) catch {};
+        var zig_dir = try self.install_dir.openDir(zig_dir_name, .{ .iterate = true });
         defer zig_dir.close();
         switch (filetype) {
             .zip => {
@@ -399,6 +416,7 @@ pub const Library = struct {
             .tar_xz => {
                 const file_reader = file.deprecatedReader();
                 var decompress = try std.compress.xz.decompress(allocator, file_reader);
+                defer decompress.deinit();
                 const decompress_reader = decompress.reader();
                 var decompress_adapter = decompress_reader.adaptToNewApi(&buffer);
                 try std.tar.pipeToFileSystem(zig_dir, &decompress_adapter.new_interface, .{});
@@ -406,6 +424,7 @@ pub const Library = struct {
         }
         var dir_it = zig_dir.iterate();
         var entries: std.ArrayList(std.fs.Dir.Entry) = .empty;
+        defer entries.deinit(allocator);
         while (try dir_it.next()) |entry| {
             try entries.append(allocator, entry);
         }
@@ -423,9 +442,9 @@ pub const Library = struct {
             while (try dir_it.next()) |entry| {
                 const old = try single_dir.realpath(entry.name, &buffer2);
                 const new = try std.fs.path.join(allocator, &[_][]const u8{ zig_path, entry.name });
+                defer allocator.free(new);
                 try std.fs.renameAbsolute(old, new);
             }
         }
     }
-
 };
