@@ -1,6 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const kf = @import("known_folders");
+const known_folders = @import("known_folders");
 const config = @import("config");
 
 pub const ParseError = error{Malformed};
@@ -55,37 +55,23 @@ pub const Spec = struct {
         const start: usize = @intFromBool(has_prefix);
         if (start + 3 != len) return ParseError.Malformed;
         return .{
-            .target = .{
-                .cpu = pieces[start],
-                .os = pieces[start + 1],
-            },
+            .target = try Target.fromStringTags(
+                pieces[start],
+                pieces[start + 1],
+            ),
             .version = try Version.parse(pieces[start + 2]),
         };
     }
 };
 
-pub const SpecContext = struct {
-    pub fn hash(_: @This(), spec: Spec) u32 {
-        var h = std.hash.Wyhash.init(0);
-        h.update(&spec.version.parts);
-        h.update(spec.target.cpu);
-        h.update(spec.target.os);
-        return @truncate(h.final());
-    }
-
-    pub fn eql(_: @This(), lhs: Spec, rhs: Spec, _: usize) bool {
-        return std.mem.eql(u8, &lhs.version.parts, &rhs.version.parts) and std.mem.eql(u8, lhs.target.cpu, rhs.target.cpu) and std.mem.eql(u8, lhs.target.os, rhs.target.os);
-    }
-};
-
 // cpu-os
 pub const Target = struct {
-    cpu: []const u8,
-    os: []const u8,
+    cpu: std.Target.Cpu.Arch,
+    os: std.Target.Os.Tag,
 
     pub const NATIVE: @This() = .{
-        .cpu = @tagName(builtin.cpu.arch),
-        .os = @tagName(builtin.os.tag),
+        .cpu = builtin.cpu.arch,
+        .os = builtin.os.tag,
     };
 
     pub fn is_executable(self: @This()) bool {
@@ -93,7 +79,14 @@ pub const Target = struct {
     }
 
     pub fn format(self: @This(), writer: *std.Io.Writer) !void {
-        try writer.print("{s}-{s}", .{ self.cpu, self.os });
+        try writer.print("{s}-{s}", .{ @tagName(self.cpu), @tagName(self.os) });
+    }
+
+    pub fn fromStringTags(cpu: []const u8, os: []const u8) ParseError!@This() {
+        return .{
+            .cpu = std.meta.stringToEnum(std.Target.Cpu.Arch, cpu) orelse return ParseError.Malformed,
+            .os = std.meta.stringToEnum(std.Target.Os.Tag, os) orelse return ParseError.Malformed,
+        };
     }
 
     pub fn parse(text: []const u8) ParseError!@This() {
@@ -107,15 +100,11 @@ pub const Target = struct {
             len += 1;
         }
         if (len != 2) return ParseError.Malformed;
-        return .{
-            .cpu = pieces[0],
-            .os = pieces[1],
-        };
+        return try fromStringTags(pieces[0], pieces[1]);
     }
 
     pub fn eql(lhs: @This(), rhs: @This()) bool {
-        return std.mem.eql(u8, lhs.cpu, rhs.cpu) and
-            std.mem.eql(u8, lhs.os, rhs.os);
+        return std.meta.eql(lhs, rhs);
     }
 };
 
@@ -162,7 +151,7 @@ pub const RemoteTarball = struct {
     checksum: []u8,
 };
 
-pub const RemoteIndexContent = std.ArrayHashMap(Spec, RemoteTarball, SpecContext, true);
+pub const RemoteIndexContent = std.AutoArrayHashMap(Spec, RemoteTarball);
 
 pub const RemoteIndex = struct {
     arena: std.heap.ArenaAllocator,
@@ -175,6 +164,7 @@ pub const RemoteIndex = struct {
 
 pub fn fetch_remote_index(backing_allocator: std.mem.Allocator) !RemoteIndex {
     var arena = std.heap.ArenaAllocator.init(backing_allocator);
+    errdefer arena.deinit();
     const allocator = arena.allocator();
 
     var content = RemoteIndexContent.init(allocator);
@@ -230,30 +220,24 @@ pub fn http_get(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
     return try writer.toOwnedSlice();
 }
 
-pub const AppDir = enum { tarball, install };
-pub fn openAppDir(comptime app_dir: AppDir, args: std.fs.Dir.OpenOptions) !std.fs.Dir {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-    const path_parts = switch (app_dir) {
-        .tarball => &[_][]const u8{
-            try kf.getPath(std.Io{}, allocator, kf.KnownFolder.cache) orelse return error.NotFound,
-            config.name,
-        },
-        .install => &[_][]const u8{
-            try kf.getPath(std.Io{}, allocator, kf.KnownFolder.data) orelse return error.NotFound,
-            config.name,
-        },
-    };
-    const path = try std.fs.path.join(allocator, path_parts);
+pub fn getAppPath(allocator: std.mem.Allocator, known_folder: known_folders.KnownFolder) ![]const u8 {
+    const parent_path =
+        try known_folders.getPath(std.Io{}, allocator, known_folder) orelse return error.NotFound;
+    defer allocator.free(parent_path);
+    const path_parts = &[_][]const u8{ parent_path, config.name };
+    return try std.fs.path.join(allocator, path_parts);
+}
+pub fn openAppDir(allocator: std.mem.Allocator, known_folder: known_folders.KnownFolder, args: std.fs.Dir.OpenOptions) !std.fs.Dir {
+    const path = try getAppPath(allocator, known_folder);
+    defer allocator.free(path);
     std.fs.cwd().makePath(path) catch |err| {
         if (err != error.PathAlreadyExists) return err;
     };
     return try std.fs.cwd().openDir(path, args);
 }
 
-pub fn install_remote_tarball(spec: Spec, remote_tarball: RemoteTarball) !void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+pub fn install_remote_tarball(backing_allocator: std.mem.Allocator, spec: Spec, remote_tarball: RemoteTarball) !void {
+    var arena = std.heap.ArenaAllocator.init(backing_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
@@ -273,7 +257,7 @@ pub fn install_remote_tarball(spec: Spec, remote_tarball: RemoteTarball) !void {
         .zip => try filename.print(allocator, ".zip", .{}),
         .tar_xz => try filename.print(allocator, ".tar.xz", .{}),
     }
-    var tarball_dir = try openAppDir(.tarball, .{});
+    var tarball_dir = try openAppDir(allocator, .cache, .{});
     defer tarball_dir.close();
     var download = true;
     var file: std.fs.File = tarball_dir.createFile(filename.items, .{ .read = true, .exclusive = true }) catch |err| file_block: {
@@ -290,7 +274,7 @@ pub fn install_remote_tarball(spec: Spec, remote_tarball: RemoteTarball) !void {
         try writer.interface.writeAll(compressed_bytes);
         try writer.interface.flush();
     }
-    var install_dir = try openAppDir(.install, .{});
+    var install_dir = try openAppDir(allocator, .data, .{});
     defer install_dir.close();
     try install_dir.makePath(zig_dir_name.items);
     errdefer install_dir.deleteTree(zig_dir_name.items) catch {};
@@ -320,19 +304,22 @@ pub fn install_remote_tarball(spec: Spec, remote_tarball: RemoteTarball) !void {
         var single_dir = try zig_dir.openDir(entries.items[0].name, .{ .iterate = true });
         defer single_dir.close();
         dir_it = single_dir.iterate();
-        const zig_path = try zig_dir.realpathAlloc(allocator, ".");
-        var old_path_buffer = std.mem.zeroes([std.fs.max_path_bytes]u8);
+
+        var buffer1 = std.mem.zeroes([std.fs.max_path_bytes]u8);
+        var buffer2 = std.mem.zeroes([std.fs.max_path_bytes]u8);
+
+        const zig_path = try zig_dir.realpath(".", &buffer1);
         while (try dir_it.next()) |entry| {
-            const old = try single_dir.realpath(entry.name, &old_path_buffer);
+            const old = try single_dir.realpath(entry.name, &buffer2);
             const new = try std.fs.path.join(allocator, &[_][]const u8{ zig_path, entry.name });
             try std.fs.renameAbsolute(old, new);
         }
     }
 }
 
-pub fn list_installed_specs(allocator: std.mem.Allocator) !std.ArrayList(Spec) {
+pub fn listInstalledSpecs(allocator: std.mem.Allocator) !std.ArrayList(Spec) {
     var specs: std.ArrayList(Spec) = .empty;
-    var install_dir = try openAppDir(.install, .{ .iterate = true });
+    var install_dir = try openAppDir(allocator, .data, .{ .iterate = true });
     defer install_dir.close();
     var dir_it = install_dir.iterate();
     while (try dir_it.next()) |entry| {
@@ -344,3 +331,50 @@ pub fn list_installed_specs(allocator: std.mem.Allocator) !std.ArrayList(Spec) {
     }
     return specs;
 }
+
+pub fn Tio(comptime out_buf_size: usize, comptime err_buf_size: usize) type {
+    return struct {
+        out_file: std.fs.File,
+        out_buf: [out_buf_size]u8 = std.mem.zeroes([out_buf_size]u8),
+        out: std.fs.File.Writer = undefined,
+
+        err_file: std.fs.File,
+        err_buf: [err_buf_size]u8 = std.mem.zeroes([err_buf_size]u8),
+        err: std.fs.File.Writer = undefined,
+
+        initialized: bool = false,
+
+        pub fn init() @This() {
+            return .{
+                .out_file = std.fs.File.stdout(),
+                .err_file = std.fs.File.stderr(),
+            };
+        }
+
+        pub fn deinit(self: *@This()) void {
+            if (self.initialized) {
+                self.out.interface.flush() catch {};
+                self.err.interface.flush() catch {};
+            }
+            self.out_file.close();
+            self.err_file.close();
+        }
+
+        pub fn interface(self: *@This()) TioInterface {
+            if (!self.initialized) {
+                self.initialized = true;
+                self.out = self.out_file.writer(&self.out_buf);
+                self.err = self.err_file.writer(&self.err_buf);
+            }
+            return .{
+                .out = &self.out.interface,
+                .err = &self.err.interface,
+            };
+        }
+    };
+}
+
+pub const TioInterface = struct {
+    out: *std.io.Writer,
+    err: *std.io.Writer,
+};

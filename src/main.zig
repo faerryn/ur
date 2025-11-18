@@ -3,47 +3,42 @@ const builtin = @import("builtin");
 const ur = @import("ur");
 const config = @import("config");
 
-var stdout: *std.io.Writer = undefined;
-var stderr: *std.io.Writer = undefined;
-
-var allocator: std.mem.Allocator = undefined;
-
-var args: [][:0]u8 = undefined;
-
 pub fn main() !void {
-    var stdout_buffer = std.mem.zeroes([1024]u8);
-    const stdout_file = std.fs.File.stdout();
-    var stdout_writer = stdout_file.writer(&stdout_buffer);
-    stdout = &stdout_writer.interface;
-    defer stdout.flush() catch {};
+    var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
+    defer {
+        _ = gpa.detectLeaks();
+        _ = gpa.deinit();
+    }
+    const allocator = gpa.allocator();
 
-    var stderr_buffer = std.mem.zeroes([1024]u8);
-    const stderr_file = std.fs.File.stderr();
-    var stderr_writer = stderr_file.writer(&stderr_buffer);
-    stderr = &stderr_writer.interface;
-    defer stderr.flush() catch {};
+    var tio_context = ur.Tio(1024, 0).init();
+    defer tio_context.deinit();
+    const tio = tio_context.interface();
 
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    allocator = arena.allocator();
+    const args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
 
-    args = try std.process.argsAlloc(allocator);
-
-    const Subcommand = enum { help, list, install, zig, version };
-    switch (if (args.len > 1)
-        std.meta.stringToEnum(Subcommand, args[1]) orelse .help
-    else
-        .help) {
-        .help => try help(),
-        .list => try list(),
-        .install => try install(),
-        .zig => try shim(),
-        .version => try print_version(),
+    const Subcommand = enum { help, version, list, install, zig };
+    const subcommand: Subcommand, const argshift: usize = subcommand_block: {
+        if (args.len < 2) {
+            break :subcommand_block .{ .help, 0 };
+        }
+        if (std.meta.stringToEnum(Subcommand, args[1])) |subcommand| {
+            break :subcommand_block .{ subcommand, 2 };
+        }
+        break :subcommand_block .{ .help, 0 };
+    };
+    switch (subcommand) {
+        .help => try help(tio),
+        .version => try print_version(tio),
+        .list => try list(allocator, tio, args[argshift..]),
+        .install => try install(allocator, tio, args[argshift..]),
+        .zig => try shim(allocator, tio, args[argshift..]),
     }
 }
 
-fn help() !void {
-    try stdout.print(
+fn help(tio: ur.TioInterface) !void {
+    try tio.out.print(
         \\A zig version manager, written in zig.
         \\
         \\Usage: {s} [COMMAND] [<ARGS>]
@@ -55,107 +50,137 @@ fn help() !void {
         \\  zig (VERSION)? [<ARGS>]           Run zig with [<ARGS>], parsing build.zig.zon for the version. Override with VERSION.
         \\  version                           Print the version of {s}.
         \\
-    , .{ args[0], config.name });
+    , .{ config.name, config.name });
 }
 
-fn print_version() !void {
-    try stdout.print("{s} {s}\n", .{ config.name, config.version });
+fn print_version(tio: ur.TioInterface) !void {
+    try tio.out.print("{s} {s}\n", .{ config.name, config.version });
 }
 
-fn list() !void {
-    const subcommand = if (args.len > 2)
-        std.meta.stringToEnum(enum { available, all, installed, help }, args[2]) orelse .help
+fn list(allocator: std.mem.Allocator, tio: ur.TioInterface, args: [][:0]u8) !void {
+    const subcommand = if (args.len > 0)
+        std.meta.stringToEnum(enum { available, all, installed }, args[0]) orelse {
+            try help(tio);
+            return;
+        }
     else
         .available;
     switch (subcommand) {
         .all, .available => {
-            var index = try ur.fetch_remote_index(std.heap.page_allocator);
+            var index = try ur.fetch_remote_index(allocator);
             defer index.deinit();
             var it = index.content.iterator();
             while (it.next()) |kv| {
                 if (subcommand == .all or kv.key_ptr.target.is_executable())
-                    try stdout.print("{f}\n", .{kv.key_ptr});
+                    try tio.out.print("{f}\n", .{kv.key_ptr});
             }
-            try stdout.flush();
+            try tio.out.flush();
         },
         .installed => {
-            var specs = try ur.list_installed_specs(allocator);
+            var specs = try ur.listInstalledSpecs(allocator);
             defer specs.deinit(allocator);
             for (specs.items) |spec| {
-                try stdout.print("{f}\n", .{spec});
+                try tio.out.print("{f}\n", .{spec});
             }
         },
-        .help => try help(),
     }
 }
 
-fn install() !void {
-    if (args.len < 3) {
-        try help();
+fn install(allocator: std.mem.Allocator, tio: ur.TioInterface, args: [][:0]u8) !void {
+    const spec: ur.Spec = spec_block: {
+        if (args.len > 1) {
+            break :spec_block ur.Spec.parse(args[0], .{ .guess = true }) catch {
+                try tio.err.print("Error: could not parse '{s}'\n", .{args[0]});
+                return;
+            };
+        }
+        if (try findBuildVersion(allocator, std.fs.cwd())) |version| {
+            break :spec_block .{
+                .target = ur.Target.NATIVE,
+                .version = version,
+            };
+        }
+        // TODO: install latest version of zig
+        try help(tio);
         return;
-    }
-    var index = try ur.fetch_remote_index(std.heap.page_allocator);
+    };
+
+    // TODO: avoid reinstalling already installed versions of zig
+
+    var index = try ur.fetch_remote_index(allocator);
     defer index.deinit();
-    const spec = ur.Spec.parse(args[2], .{ .guess = true }) catch {
-        try stderr.print("Error: could not parse '{s}'\n", .{args[2]});
-        return;
-    };
-
     const remote_tarball = index.content.get(spec) orelse {
-        try stderr.print("Error: zig version '{f}' does not exist or not support architecture '{f}'\n", .{ spec.version, spec.target });
+        try tio.err.print("Error: zig version '{f}' does not exist or not support architecture '{f}'\n", .{ spec.version, spec.target });
         return;
     };
-    try stdout.print("Installing zig {f}...\n", .{spec});
-    try stdout.flush();
-    try ur.install_remote_tarball(spec, remote_tarball);
+    try tio.out.print("Installing zig {f}...\n", .{spec});
+    try tio.out.flush();
+    try ur.install_remote_tarball(allocator, spec, remote_tarball);
 }
 
-fn shim() !void {
-    var args_shift: usize = 2;
+fn findBuildVersion(allocator: std.mem.Allocator, dir: std.fs.Dir) !?ur.Version {
+    if (dir.openFile("build.zig.zon", .{})) |file| {
+        defer file.close();
+        const stat = try file.stat();
+        var buffer = std.mem.zeroes([1024]u8);
+        var reader = file.reader(&buffer);
+        var source = try allocator.alloc(u8, stat.size + 1);
+        defer allocator.free(source);
+        @memset(source, 0);
+        try reader.interface.readSliceAll(source[0..stat.size]);
+        if (std.zon.parse.fromSlice(struct { minimum_zig_version: []const u8 }, allocator, source[0..stat.size :0], null, .{ .ignore_unknown_fields = true })) |zon| {
+            defer allocator.free(zon.minimum_zig_version);
+            if (ur.Version.parse(zon.minimum_zig_version)) |version| {
+                return version;
+            } else |_| {}
+        } else |err| {
+            if (err != error.ParseZon) {
+                return err;
+            }
+        }
+    } else |err| {
+        if (err != error.FileNotFound) {
+            return err;
+        }
+    }
+
+    var parent = try dir.openDir("..", .{});
+    defer parent.close();
+    var buffer1 = std.mem.zeroes([std.fs.max_path_bytes]u8);
+    var buffer2 = std.mem.zeroes([std.fs.max_path_bytes]u8);
+    const dir_path = try dir.realpath(".", &buffer1);
+    const parent_path = try parent.realpath(".", &buffer2);
+    if (std.mem.eql(u8, dir_path, parent_path)) {
+        return null;
+    }
+    return try findBuildVersion(allocator, parent);
+}
+
+fn shim(allocator: std.mem.Allocator, tio: ur.TioInterface, parent_args: [][:0]u8) !void {
+    var args = parent_args;
     const spec: ur.Spec =
         spec_block: {
             // Check if VERSION is specified
-            if (args.len > 2) {
-                if (ur.Spec.parse(args[2], .{ .guess = true })) |spec| {
-                    args_shift += 1;
+            if (args.len > 0) {
+                if (ur.Spec.parse(args[0], .{ .guess = true })) |spec| {
+                    args = args[1..];
                     break :spec_block spec;
                 } else |_| {}
             }
             // Check if build.zig.zon specifies version
-            // TODO: check parent directories for build.zig.zon
-            if (std.fs.cwd().openFile("build.zig.zon", .{})) |file| {
-                defer file.close();
-                const stat = try file.stat();
-                var buffer = std.mem.zeroes([1024]u8);
-                var reader = file.reader(&buffer);
-                var source = try allocator.alloc(u8, stat.size + 1);
-                @memset(source, 0);
-                try reader.interface.readSliceAll(source[0..stat.size]);
-                if (std.zon.parse.fromSlice(struct { minimum_zig_version: []const u8 }, allocator, source[0..stat.size :0], null, .{ .ignore_unknown_fields = true })) |zon| {
-                    if (ur.Version.parse(zon.minimum_zig_version)) |version| {
-                        break :spec_block .{
-                            .target = ur.Target.NATIVE,
-                            .version = version,
-                        };
-                    } else |_| {}
-                } else |err| {
-                    if (err != error.ParseZon) {
-                        return err;
-                    }
-                }
-            } else |err| {
-                if (err != error.FileNotFound) {
-                    return err;
-                }
+            if (try findBuildVersion(allocator, std.fs.cwd())) |version| {
+                break :spec_block .{
+                    .target = ur.Target.NATIVE,
+                    .version = version,
+                };
             }
             // Check for latest installed version
-            var local_specs = try ur.list_installed_specs(allocator);
+            var local_specs = try ur.listInstalledSpecs(allocator);
             defer local_specs.deinit(allocator);
             var latest_spec: ?ur.Spec = null;
             for (local_specs.items) |spec| {
                 if (spec.target.is_executable() and
-                    (latest_spec == null or
-                        spec.version.gt(latest_spec.?.version)))
+                    if (latest_spec) |ls| spec.version.gt(ls.version) else true)
                 {
                     latest_spec = spec;
                 }
@@ -166,31 +191,38 @@ fn shim() !void {
             // TODO: Check online for latest tagged version
             return error.Unimplemented;
         };
-    var argv: std.ArrayList([]const u8) = .empty;
+
+    var buffer = std.mem.zeroes([std.fs.max_path_bytes]u8);
+    var argv: std.ArrayList([]u8) = .empty;
     defer argv.deinit(allocator);
     {
         var zig_dir_name: std.ArrayList(u8) = .empty;
+        defer zig_dir_name.deinit(allocator);
         try zig_dir_name.print(allocator, "{f}", .{spec});
-        var install_dir = try ur.openAppDir(.install, .{});
+        var install_dir = try ur.openAppDir(allocator, .data, .{});
         defer install_dir.close();
-        var zig_dir: std.fs.Dir = try install_dir.openDir(zig_dir_name.items, .{});
+        var zig_dir: std.fs.Dir = install_dir.openDir(zig_dir_name.items, .{}) catch |err| {
+            if (err != error.FileNotFound) return err;
+            // TODO: Install zig as needed
+            try tio.out.print("Installing zig...\n", .{});
+            return error.Unimplemented;
+        };
         defer zig_dir.close();
-        // TODO: Install as needed
-        var buffer = std.mem.zeroes([std.fs.max_path_bytes]u8);
         const zig_exe = try zig_dir.realpath(if (builtin.os.tag == .windows) "zig.exe" else "zig", &buffer);
         try argv.append(allocator, zig_exe);
-        for (args[args_shift..]) |arg| {
-            try argv.append(allocator, arg);
-        }
     }
-    try stdout.flush();
-    try stderr.flush();
-    if (std.process.can_execv) {
-        return std.process.execv(allocator, argv.items);
+    for (args) |arg| {
+        try argv.append(allocator, arg);
+    }
+
+    // Execv will prevent us from using GPA's memory leak detection
+    if (std.process.can_execv and builtin.mode != .Debug) {
+        const err = std.process.execv(argv.allocator, argv.content);
+        argv.deinit();
+        return err;
     } else if (std.process.can_spawn) {
         var child = std.process.Child.init(argv.items, allocator);
-        const term = try child.spawnAndWait();
-        return std.process.exit(term.Exited);
+        _ = try child.spawnAndWait();
     } else {
         @compileError("No shim mechanism!");
     }
