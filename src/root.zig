@@ -244,7 +244,11 @@ fn getAppPath(allocator: std.mem.Allocator, known_folder: known_folders.KnownFol
     const parent_path =
         try known_folders.getPath(std.Io{}, allocator, known_folder) orelse return error.NotFound;
     defer allocator.free(parent_path);
-    const path_parts = &[_][]const u8{ parent_path, config.name };
+    const sub_path = switch(builtin.os.tag) {
+        .macos => "com.faerryn." ++ config.name,
+        else => config.name,
+    };
+    const path_parts = &[_][]const u8{ parent_path, sub_path };
     return try std.fs.path.join(allocator, path_parts);
 }
 fn openAppDir(allocator: std.mem.Allocator, known_folder: known_folders.KnownFolder, args: std.fs.Dir.OpenOptions) !std.fs.Dir {
