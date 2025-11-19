@@ -11,7 +11,7 @@ pub fn main() !void {
     }
     const allocator = gpa.allocator();
 
-    var tio_context = ur.Tio(1024, 0).init();
+    var tio_context = ur.Tio(if (builtin.mode == .Debug) 0 else 4096, 0).init();
     defer tio_context.deinit();
     const tio = tio_context.interface();
 
@@ -36,7 +36,7 @@ pub fn main() !void {
         .version => try print_version(tio),
         .list => try list(allocator, tio, args[argshift..]),
         .install => try install(allocator, tio, args[argshift..]),
-        .uninstall => try uninstall(allocator, tio, args[argshift..]),
+        .uninstall => try uninstall(tio, args[argshift..]),
         .zig => try shim(allocator, tio, args[argshift..]),
     }
 }
@@ -64,20 +64,23 @@ fn print_version(tio: ur.TioInterface) !void {
 }
 
 fn list(allocator: std.mem.Allocator, tio: ur.TioInterface, args: [][:0]u8) !void {
-    const subcommand = if (args.len > 0)
-        std.meta.stringToEnum(enum { available, all, installed }, args[0]) orelse {
+    const subcommand = subcommand_block: {
+        if (args.len > 0) {
+            if (std.meta.stringToEnum(enum { available, all, installed }, args[0])) |subcommand| {
+                break :subcommand_block subcommand;
+            }
             try help(tio);
             return;
         }
-    else
-        .available;
+        break :subcommand_block .available;
+    };
     switch (subcommand) {
         .all, .available => {
             var index = try ur.fetch_remote_index(allocator);
             defer index.deinit();
             var it = index.content.iterator();
             while (it.next()) |kv| {
-                if (subcommand == .all or kv.key_ptr.target.is_executable())
+                if (subcommand == .all or kv.key_ptr.target.isNative())
                     try tio.out.print("{f}\n", .{kv.key_ptr});
             }
             try tio.out.flush();
@@ -85,9 +88,8 @@ fn list(allocator: std.mem.Allocator, tio: ur.TioInterface, args: [][:0]u8) !voi
         .installed => {
             var library = try ur.Library.init();
             defer library.deinit();
-            var specs = try library.list(allocator);
-            defer specs.deinit(allocator);
-            for (specs.items) |spec| {
+            var it = library.iterate();
+            while (try it.next()) |spec| {
                 try tio.out.print("{f}\n", .{spec});
             }
         },
@@ -96,9 +98,16 @@ fn list(allocator: std.mem.Allocator, tio: ur.TioInterface, args: [][:0]u8) !voi
 
 fn install(allocator: std.mem.Allocator, tio: ur.TioInterface, args: [][:0]u8) !void {
     const spec: ur.Spec = spec_block: {
-        // Check if VERSION is specified
+        // TODO: somehow prepare a (not-slow) fallback default from the remote index
+        const build_version = try ur.findBuildVersion(allocator, std.fs.cwd());
+        // Check if SPEC is specified
         if (args.len > 0) {
-            if (ur.Spec.parse(args[0], .{ .allow_and_infer_all = true })) |spec| {
+            // TODO: Infer version somehow
+            if (ur.Spec.parse(
+                args[0],
+                .{ .infer_prefix = true, .infer_target = true, .infer_version = build_version },
+                .{ .infer_cpu = true, .infer_os = true },
+            )) |spec| {
                 break :spec_block spec;
             } else |_| {
                 try tio.err.print("Error: could not parse '{s}'\n", .{args[0]});
@@ -106,7 +115,7 @@ fn install(allocator: std.mem.Allocator, tio: ur.TioInterface, args: [][:0]u8) !
             }
         }
         // Check if build.zig.zon specifies version
-        if (try ur.findBuildVersion(allocator, std.fs.cwd())) |version| {
+        if (build_version) |version| {
             break :spec_block .{
                 .target = ur.Target.NATIVE,
                 .version = version,
@@ -119,7 +128,7 @@ fn install(allocator: std.mem.Allocator, tio: ur.TioInterface, args: [][:0]u8) !
 
     var library = try ur.Library.init();
     defer library.deinit();
-    if (try library.is_installed(spec)) {
+    if (try library.isInstalled(spec)) {
         try tio.err.print("Error: {f} is already installed.\n", .{spec});
         return;
     }
@@ -131,7 +140,7 @@ fn ensure_installed(allocator: std.mem.Allocator, tio: ur.TioInterface, spec: ur
     var library = try ur.Library.init();
     defer library.deinit();
 
-    if (try library.is_installed(spec)) return;
+    if (try library.isInstalled(spec)) return;
 
     var index = try ur.fetch_remote_index(allocator);
     defer index.deinit();
@@ -142,36 +151,43 @@ fn ensure_installed(allocator: std.mem.Allocator, tio: ur.TioInterface, spec: ur
     try tio.out.print("Starting to install {f} .\n", .{spec});
     try tio.out.flush();
 
-    try library.install_remote_tarball(allocator, spec, remote_tarball);
+    try library.installRemoteTarball(allocator, spec, remote_tarball);
     try tio.out.print("Finished installing {f} .\n", .{spec});
 }
 
 fn shim(allocator: std.mem.Allocator, tio: ur.TioInterface, parent_args: [][:0]u8) !void {
     var args = parent_args;
+    var library = try ur.Library.init();
+    defer library.deinit();
     const spec: ur.Spec =
         spec_block: {
-            // Check if VERSION is specified
+            // TODO: somehow prepare a (not-slow) fallback default from the remote index
+            const build_version = try ur.findBuildVersion(allocator, std.fs.cwd());
+            // Check if SPEC is specified
             if (args.len > 0) {
-                if (ur.Spec.parse(args[0], .{ .allow_and_infer_all = true })) |spec| {
+                if (ur.Spec.parse(args[0], .{ .infer_prefix = true, .infer_target = true, .infer_version = build_version }, .{ .infer_cpu = true, .infer_os = true })) |spec| {
                     args = args[1..];
                     break :spec_block spec;
                 } else |_| {}
+                // Attempt to match against library
+                if (try library.match(args[0])) |spec| {
+                    args = args[1..];
+                    break :spec_block spec;
+                }
+                // No error here about args[0] since it might be for zig
             }
             // Check if build.zig.zon specifies version
-            if (try ur.findBuildVersion(allocator, std.fs.cwd())) |version| {
+            if (build_version) |version| {
                 break :spec_block .{
                     .target = ur.Target.NATIVE,
                     .version = version,
                 };
             }
             // Check for latest installed version
-            var library = try ur.Library.init();
-            defer library.deinit();
-            var local_specs = try library.list(allocator);
-            defer local_specs.deinit(allocator);
+            var it = library.iterate();
             var latest_spec: ?ur.Spec = null;
-            for (local_specs.items) |spec| {
-                if (spec.target.is_executable() and
+            while (try it.next()) |spec| {
+                if (spec.target.isNative() and
                     if (latest_spec) |ls| spec.version.gt(ls.version) else true)
                 {
                     latest_spec = spec;
@@ -180,12 +196,25 @@ fn shim(allocator: std.mem.Allocator, tio: ur.TioInterface, parent_args: [][:0]u
             if (latest_spec) |spec| {
                 break :spec_block spec;
             }
-            // TODO: Check online for latest tagged version
-            return error.Unimplemented;
+            var index = try ur.fetch_remote_index(allocator);
+            defer index.deinit();
+            var candidate: ?ur.Spec = null;
+            for (index.content.keys()) |spec| {
+                if (spec.target.isNative()) {
+                    if (candidate) |other| {
+                        if (spec.version.gt(other.version)) {
+                            candidate = spec;
+                        }
+                    } else {
+                        candidate = spec;
+                    }
+                }
+            }
+            if (candidate) |spec| break :spec_block spec;
+            // nothing even from index.json ?
+            try tio.out.print("There does not seem to be a native version of zig for your architecture. You may try installing foreign architectures and running them with emulation.", .{});
+            return;
         };
-
-    var library = try ur.Library.init();
-    defer library.deinit();
 
     try ensure_installed(allocator, tio, spec);
     var zig_dir = try library.openZigDir(spec, .{});
@@ -214,51 +243,22 @@ fn shim(allocator: std.mem.Allocator, tio: ur.TioInterface, parent_args: [][:0]u
     }
 }
 
-fn uninstall(allocator: std.mem.Allocator, tio: ur.TioInterface, args: [][:0]u8) !void {
+fn uninstall(tio: ur.TioInterface, args: [][:0]u8) !void {
     var library = try ur.Library.init();
     defer library.deinit();
 
     const spec = spec_block: {
-        // Try to parse VERSION
+        // Try to parse SPEC
         if (args.len > 0) {
-            if (ur.Spec.parse(args[0], .{ .allow_no_prefix = true })) |spec| {
-                if (try library.is_installed(spec)) break :spec_block spec;
+            if (ur.Spec.parse(args[0], .{ .infer_prefix = true, .infer_target = true }, .{ .infer_cpu = true, .infer_os = true })) |spec| {
+                if (try library.isInstalled(spec)) break :spec_block spec;
             } else |_| {}
-        }
-        // Check if args[0] matches the version string or target string
-        const try_target = ur.Target.parse(args[0]) catch null;
-        const try_version = ur.Version.parse(args[0]) catch null;
-        if (try_target == null and try_version == null) {
+            // Check if args[0] is a version or target of something installed
+            if (try library.match(args[0])) |spec| break :spec_block spec;
             try tio.err.print("Error: could not parse '{s}'\n", .{args[0]});
-            return;
         }
-        var candidates: std.ArrayList(ur.Spec) = .empty;
-        defer candidates.deinit(allocator);
-        var specs = try library.list(allocator);
-        defer specs.deinit(allocator);
-        for (specs.items) |spec| {
-            if (try_target) |target| {
-                if (target.eql(spec.target)) {
-                    try candidates.append(allocator, spec);
-                }
-            }
-            if (try_version) |version| {
-                if (version.eql(spec.version)) {
-                    try candidates.append(allocator, spec);
-                }
-            }
-        }
-        if (candidates.items.len == 0) {
-            try tio.err.print("Error: found no matches for '{s}'\n", .{args[0]});
-            return;
-        } else if (candidates.items.len > 1) {
-            try tio.err.print("Error: the query '{s}' is ambiguous, and matched the following:\n", .{args[0]});
-            for (candidates.items) |spec| {
-                try tio.err.print("{f}\n", .{spec});
-            }
-            return;
-        }
-        break :spec_block candidates.items[0];
+        try help(tio);
+        return;
     };
 
     var buffer = std.mem.zeroes([std.fs.max_name_bytes]u8);

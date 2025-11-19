@@ -3,13 +3,17 @@ const builtin = @import("builtin");
 const known_folders = @import("known_folders");
 const config = @import("config");
 
-pub const ParseError = error{Malformed};
+pub const ParseError = error{Malformed} || std.fmt.ParseIntError;
+
+pub const TargetParseOptions = struct {
+    infer_cpu: bool = false, // just parse as os and infer cpu
+    infer_os: bool = false, // just parse as cpu and infer os
+};
 
 pub const SpecParseOptions = struct {
-    allow_no_prefix: bool = false, // without the `zig-` prefix
-    allow_from_version: bool = false, // parse as version and infer target
-
-    allow_and_infer_all: bool = false, // if true, then all other fields are treated as true
+    infer_prefix: bool = false, // parse with or without the "zig-" prefix
+    infer_target: bool = false, // just parse as version and infer target
+    infer_version: ?Version = null, // just parse as target and infer version
 };
 
 // zig-target-version
@@ -27,45 +31,38 @@ pub const Spec = struct {
         return writer.buffered();
     }
 
-    pub fn parse(text: []const u8, options: SpecParseOptions) ParseError!@This() {
-        if (Spec.parse_impl(text, options.allow_and_infer_all or options.allow_no_prefix)) |spec| {
+    pub fn parse(
+        text: []const u8,
+        spec_opts: SpecParseOptions,
+        target_opts: TargetParseOptions,
+    ) ParseError!@This() {
+        if (Spec.parse_impl(text, spec_opts.infer_prefix, target_opts)) |spec| {
             return spec;
-        } else |err| {
-            if (err != ParseError.Malformed) return err;
-        }
-        if (options.allow_and_infer_all or options.allow_from_version) {
+        } else |_| {}
+        if (spec_opts.infer_target) {
             if (Version.parse(text)) |version| {
                 return .{ .target = .NATIVE, .version = version };
-            } else |err| {
-                if (err != ParseError.Malformed) return err;
-            }
+            } else |_| {}
         }
-        // TODO: parse target by matching to a *default version*
-        // if (Target.parse(text)) |target| { }
+        if (spec_opts.infer_version) |version| {
+            if (Target.parse(text, target_opts)) |target| {
+                return .{ .target = target, .version = version };
+            } else |_| {}
+        }
         return ParseError.Malformed;
     }
 
-    fn parse_impl(text: []const u8, allow_no_prefix: bool) !@This() {
-        var it = std.mem.splitScalar(u8, text, '-');
-        var pieces = std.mem.zeroes([4][]const u8);
-        var len: usize = 0;
-        while (it.next()) |piece| {
-            if (len == 4) return ParseError.Malformed;
-            if (piece.len == 0) return ParseError.Malformed;
-            pieces[len] = piece;
-            len += 1;
-        }
-        if (len < 3) return ParseError.Malformed;
-        const has_prefix = std.mem.eql(u8, "zig", pieces[0]);
-        if (!allow_no_prefix and !has_prefix) return ParseError.Malformed;
-        const start: usize = @intFromBool(has_prefix);
-        if (start + 3 != len) return ParseError.Malformed;
+    fn parse_impl(text: []const u8, infer_prefix: bool, target_opts: TargetParseOptions) !@This() {
+        const firstDash = std.mem.indexOfScalar(u8, text, '-') orelse return ParseError.Malformed;
+        const lastDash = std.mem.lastIndexOfScalar(u8, text, '-') orelse return ParseError.Malformed;
+        const version = try Version.parse(text[lastDash + 1 ..]);
+        const has_prefix = std.mem.eql(u8, "zig", text[0..firstDash]);
+        if (!has_prefix and !infer_prefix) return ParseError.Malformed;
+        const target_str = if (has_prefix) text[firstDash + 1 .. lastDash] else text[0..firstDash];
+        const target = try Target.parse(target_str, target_opts);
         return .{
-            .target = try Target.fromStringTags(
-                pieces[start],
-                pieces[start + 1],
-            ),
-            .version = try Version.parse(pieces[start + 2]),
+            .target = target,
+            .version = version,
         };
     }
 };
@@ -80,7 +77,7 @@ pub const Target = struct {
         .os = builtin.os.tag,
     };
 
-    pub fn is_executable(self: @This()) bool {
+    pub fn isNative(self: @This()) bool {
         return eql(self, NATIVE);
     }
 
@@ -88,25 +85,24 @@ pub const Target = struct {
         try writer.print("{s}-{s}", .{ @tagName(self.cpu), @tagName(self.os) });
     }
 
-    pub fn fromStringTags(cpu: []const u8, os: []const u8) ParseError!@This() {
+    pub fn fromTagNames(cpu: []const u8, os: []const u8) ParseError!@This() {
         return .{
             .cpu = std.meta.stringToEnum(std.Target.Cpu.Arch, cpu) orelse return ParseError.Malformed,
             .os = std.meta.stringToEnum(std.Target.Os.Tag, os) orelse return ParseError.Malformed,
         };
     }
 
-    pub fn parse(text: []const u8) ParseError!@This() {
-        var it = std.mem.splitScalar(u8, text, '-');
-        var pieces = std.mem.zeroes([2][]const u8);
-        var len: usize = 0;
-        while (it.next()) |piece| {
-            if (len == 2) return ParseError.Malformed;
-            if (piece.len == 0) return ParseError.Malformed;
-            pieces[len] = piece;
-            len += 1;
+    pub fn parse(text: []const u8, opts: TargetParseOptions) ParseError!@This() {
+        if (std.mem.indexOfScalar(u8, text, '-')) |dash| {
+            return try fromTagNames(text[0..dash], text[dash + 1 ..]);
+        } else {
+            const try_cpu = std.meta.stringToEnum(std.Target.Cpu.Arch, text);
+            const try_os = std.meta.stringToEnum(std.Target.Os.Tag, text);
+            if (try_cpu == null and try_os == null) return ParseError.Malformed;
+            const cpu = try_cpu orelse if (opts.infer_cpu) NATIVE.cpu else return ParseError.Malformed;
+            const os = try_os orelse if (opts.infer_os) NATIVE.os else return ParseError.Malformed;
+            return .{ .cpu = cpu, .os = os };
         }
-        if (len != 2) return ParseError.Malformed;
-        return try fromStringTags(pieces[0], pieces[1]);
     }
 
     pub fn eql(lhs: @This(), rhs: @This()) bool {
@@ -140,7 +136,7 @@ pub const Version = struct {
         var len: usize = 0;
         while (it.next()) |piece| {
             if (len == 3) return ParseError.Malformed;
-            parts[len] = try parse_decimal(piece);
+            parts[len] = try parseDecimal(piece);
             len += 1;
         }
         if (len != 3) return ParseError.Malformed;
@@ -148,15 +144,9 @@ pub const Version = struct {
     }
 };
 
-fn parse_decimal(text: []const u8) !u8 {
-    if (text.len == 0) return ParseError.Malformed;
-    var acc: u8 = 0;
-    for (text) |c| {
-        if (!std.ascii.isDigit(c)) return ParseError.Malformed;
-        acc *= 10;
-        acc += c - '0';
-    }
-    return acc;
+fn parseDecimal(text: []const u8) ParseError!u8 {
+    for (text) |c| if (!std.ascii.isDigit(c)) return ParseError.Malformed;
+    return try std.fmt.parseInt(u8, text, 10);
 }
 
 pub const RemoteTarball = struct {
@@ -196,7 +186,7 @@ pub fn fetch_remote_index(backing_allocator: std.mem.Allocator) !RemoteIndex {
         const version = try Version.parse(index_kv.key_ptr.*);
         var version_it = index_kv.value_ptr.object.iterator();
         while (version_it.next()) |kv| {
-            const target = Target.parse(kv.key_ptr.*) catch |err| {
+            const target = Target.parse(kv.key_ptr.*, .{}) catch |err| {
                 if (err == ParseError.Malformed) continue else return err;
             };
             const remote_tarball = std.json.parseFromValueLeaky(struct {
@@ -244,7 +234,7 @@ fn getAppPath(allocator: std.mem.Allocator, known_folder: known_folders.KnownFol
     const parent_path =
         try known_folders.getPath(std.Io{}, allocator, known_folder) orelse return error.NotFound;
     defer allocator.free(parent_path);
-    const sub_path = switch(builtin.os.tag) {
+    const sub_path = switch (builtin.os.tag) {
         .macos => "com.faerryn." ++ config.name,
         else => config.name,
     };
@@ -311,7 +301,7 @@ pub fn findBuildVersion(allocator: std.mem.Allocator, dir: std.fs.Dir) !?Version
     if (dir.openFile("build.zig.zon", .{})) |file| {
         defer file.close();
         const stat = try file.stat();
-        var buffer = std.mem.zeroes([1024]u8);
+        var buffer = std.mem.zeroes([4096]u8);
         var reader = file.reader(&buffer);
         var source = try allocator.alloc(u8, stat.size + 1);
         defer allocator.free(source);
@@ -365,17 +355,20 @@ pub const Library = struct {
         self.cache_dir.close();
     }
 
-    pub fn list(self: @This(), allocator: std.mem.Allocator) !std.ArrayList(Spec) {
-        var specs: std.ArrayList(Spec) = .empty;
-        var dir_it = self.data_dir.iterate();
-        while (try dir_it.next()) |entry| {
-            if (entry.kind != .directory) {
-                continue;
+    pub const Iterator = struct {
+        it: std.fs.Dir.Iterator,
+        pub fn next(self: *@This()) !?Spec {
+            while (try self.it.next()) |entry| {
+                if (entry.kind != .directory) continue;
+                const spec = Spec.parse(entry.name, .{}, .{}) catch continue;
+                return spec;
             }
-            const spec = Spec.parse(entry.name, .{}) catch continue;
-            try specs.append(allocator, spec);
+            return null;
         }
-        return specs;
+    };
+
+    pub fn iterate(self: @This()) Iterator {
+        return .{ .it = self.data_dir.iterate() };
     }
 
     pub fn openZigDir(self: @This(), spec: Spec, args: std.fs.Dir.OpenOptions) !std.fs.Dir {
@@ -383,7 +376,7 @@ pub const Library = struct {
         return try self.data_dir.openDir(try spec.buffered(&buffer), args);
     }
 
-    pub fn is_installed(self: @This(), spec: Spec) !bool {
+    pub fn isInstalled(self: @This(), spec: Spec) !bool {
         var buffer = std.mem.zeroes([std.fs.max_name_bytes]u8);
         if (self.data_dir.access(try spec.buffered(&buffer), .{})) {
             return true;
@@ -393,7 +386,7 @@ pub const Library = struct {
         }
     }
 
-    pub fn install_remote_tarball(self: @This(), allocator: std.mem.Allocator, spec: Spec, remote_tarball: RemoteTarball) !void {
+    pub fn installRemoteTarball(self: @This(), allocator: std.mem.Allocator, spec: Spec, remote_tarball: RemoteTarball) !void {
         var zig_dir_name_buffer = std.mem.zeroes([std.fs.max_path_bytes]u8);
         var zig_dir_name_writer = std.Io.Writer.fixed(&zig_dir_name_buffer);
         try zig_dir_name_writer.print("{f}", .{spec});
@@ -425,7 +418,7 @@ pub const Library = struct {
             break :file_block try self.cache_dir.openFile(filename, .{});
         };
         defer file.close();
-        var buffer = std.mem.zeroes([1024]u8);
+        var buffer = std.mem.zeroes([4096]u8);
         if (download) {
             errdefer self.cache_dir.deleteFile(filename) catch {};
             var writer = file.writer(&buffer);
@@ -477,6 +470,31 @@ pub const Library = struct {
                 try std.fs.renameAbsolute(old, new);
             }
         }
+    }
+
+    // TODO: consider returning errors instead of an option?
+    pub fn match(self: @This(), text: []u8) !?Spec {
+        const try_target = Target.parse(text, .{ .infer_cpu = true, .infer_os = true }) catch null;
+        const try_version = Version.parse(text) catch null;
+        if (try_target == null and try_version == null) return null;
+        var candidate: ?Spec = null;
+
+        var it = self.iterate();
+        while (try it.next()) |spec| {
+            if (try_target) |target| {
+                if (target.eql(spec.target)) {
+                    if (candidate) |_| return null;
+                    candidate = spec;
+                }
+            }
+            if (try_version) |version| {
+                if (version.eql(spec.version)) {
+                    if (candidate) |_| return null;
+                    candidate = spec;
+                }
+            }
+        }
+        return candidate;
     }
 };
 
