@@ -96,36 +96,52 @@ fn list(allocator: std.mem.Allocator, tio: ur.TioInterface, args: [][:0]u8) !voi
     }
 }
 
-fn install(allocator: std.mem.Allocator, tio: ur.TioInterface, args: [][:0]u8) !void {
-    const spec: ur.Spec = spec_block: {
-        // TODO: somehow prepare a (not-slow) fallback default from the remote index
-        const build_version = try ur.findBuildVersion(allocator, std.fs.cwd());
-        // Check if SPEC is specified
-        if (args.len > 0) {
-            // TODO: Infer version somehow
-            if (ur.Spec.parse(
-                args[0],
-                .{ .infer_prefix = true, .infer_target = true, .infer_version = build_version },
-                .{ .infer_cpu = true, .infer_os = true },
-            )) |spec| {
-                break :spec_block spec;
-            } else |_| {
-                try tio.err.print("Error: could not parse '{s}'\n", .{args[0]});
-                return;
+const GuessSpecResults = struct {
+    spec: ur.Spec,
+    argshift: usize,
+};
+// guess the spec for install and shim
+fn guessSpec(allocator: std.mem.Allocator, tio: ur.TioInterface, args: [][:0]u8, opt_library: ?ur.Library) !?GuessSpecResults {
+    // TODO: somehow prepare a (not-slow) fallback default from the remote index
+    const build_version = try ur.findBuildVersion(allocator, std.fs.cwd());
+    // Check if SPEC is specified
+    if (args.len > 0) {
+        // TODO: Infer version somehow
+        if (ur.Spec.parse(
+            args[0],
+            .{ .infer_prefix = true, .infer_target = true, .infer_version = build_version },
+            .{ .infer_cpu = true, .infer_os = true },
+        )) |spec| {
+            return .{ .spec = spec, .argshift = 1 };
+        } else |_| {}
+        // Attempt to match against library
+        if (opt_library) |library| {
+            if (try library.match(args[0])) |spec| {
+                return .{ .spec = spec, .argshift = 1 };
             }
         }
-        // Check if build.zig.zon specifies version
-        if (build_version) |version| {
-            break :spec_block .{
-                .target = ur.Target.NATIVE,
-                .version = version,
-            };
-        }
-        // TODO: install latest version of zig
-        try help(tio);
-        return;
-    };
+        try tio.err.print("Error: could not parse '{s}'\n", .{args[0]});
+        return null;
+    }
+    // Check if build.zig.zon specifies version
+    if (build_version) |version| {
+        return .{ .spec = .{
+            .target = ur.Target.NATIVE,
+            .version = version,
+        }, .argshift = 0 };
+    }
+    // Check for latest remote version
+    var index = try ur.fetch_remote_index(allocator);
+    defer index.deinit();
+    if (index.defaultRemoteSpec()) |spec| return .{ .spec = spec, .argshift = 0 };
+    // Somehow there is nothing!
+    try tio.out.print("There does not seem to be a native version of zig for your architecture. You may try installing foreign architectures and running them with emulation.", .{});
+    return null;
+}
 
+fn install(allocator: std.mem.Allocator, tio: ur.TioInterface, args: [][:0]u8) !void {
+    const guess = try guessSpec(allocator, tio, args, null) orelse return;
+    const spec = guess.spec;
     var library = try ur.Library.init();
     defer library.deinit();
     if (try library.isInstalled(spec)) {
@@ -156,65 +172,12 @@ fn ensure_installed(allocator: std.mem.Allocator, tio: ur.TioInterface, spec: ur
 }
 
 fn shim(allocator: std.mem.Allocator, tio: ur.TioInterface, parent_args: [][:0]u8) !void {
-    var args = parent_args;
     var library = try ur.Library.init();
     defer library.deinit();
-    const spec: ur.Spec =
-        spec_block: {
-            // TODO: somehow prepare a (not-slow) fallback default from the remote index
-            const build_version = try ur.findBuildVersion(allocator, std.fs.cwd());
-            // Check if SPEC is specified
-            if (args.len > 0) {
-                if (ur.Spec.parse(args[0], .{ .infer_prefix = true, .infer_target = true, .infer_version = build_version }, .{ .infer_cpu = true, .infer_os = true })) |spec| {
-                    args = args[1..];
-                    break :spec_block spec;
-                } else |_| {}
-                // Attempt to match against library
-                if (try library.match(args[0])) |spec| {
-                    args = args[1..];
-                    break :spec_block spec;
-                }
-                // No error here about args[0] since it might be for zig
-            }
-            // Check if build.zig.zon specifies version
-            if (build_version) |version| {
-                break :spec_block .{
-                    .target = ur.Target.NATIVE,
-                    .version = version,
-                };
-            }
-            // Check for latest installed version
-            var it = library.iterate();
-            var latest_spec: ?ur.Spec = null;
-            while (try it.next()) |spec| {
-                if (spec.target.isNative() and
-                    if (latest_spec) |ls| spec.version.gt(ls.version) else true)
-                {
-                    latest_spec = spec;
-                }
-            }
-            if (latest_spec) |spec| {
-                break :spec_block spec;
-            }
-            var index = try ur.fetch_remote_index(allocator);
-            defer index.deinit();
-            var candidate: ?ur.Spec = null;
-            for (index.content.keys()) |spec| {
-                if (spec.target.isNative()) {
-                    if (candidate) |other| {
-                        if (spec.version.gt(other.version)) {
-                            candidate = spec;
-                        }
-                    } else {
-                        candidate = spec;
-                    }
-                }
-            }
-            if (candidate) |spec| break :spec_block spec;
-            // nothing even from index.json ?
-            try tio.out.print("There does not seem to be a native version of zig for your architecture. You may try installing foreign architectures and running them with emulation.", .{});
-            return;
-        };
+
+    const guess = try guessSpec(allocator, tio, args, library) orelse return;
+    const spec = guess.spec;
+    const args = parent_args[guess.argshift..];
 
     try ensure_installed(allocator, tio, spec);
     var zig_dir = try library.openZigDir(spec, .{});
@@ -265,3 +228,6 @@ fn uninstall(tio: ur.TioInterface, args: [][:0]u8) !void {
     try library.data_dir.deleteTree(try spec.buffered(&buffer));
     try tio.out.print("Uninstalled {f} .\n", .{spec});
 }
+
+// TODO: Avoid rebuilding library and index too many times. Singletons?
+// TODO: Stick strings into some sort of localization file.

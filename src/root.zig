@@ -163,6 +163,23 @@ pub const RemoteIndex = struct {
     pub fn deinit(self: *@This()) void {
         self.arena.deinit();
     }
+
+    // Returns null if content is empty (should be unlikely)
+    pub fn defaultRemoteSpec(self: @This()) ?Spec {
+        var candidate: ?Spec = null;
+        for (self.content.keys()) |spec| {
+            if (spec.target.isNative()) {
+                if (candidate) |other| {
+                    if (spec.version.gt(other.version)) {
+                        candidate = spec;
+                    }
+                } else {
+                    candidate = spec;
+                }
+            }
+        }
+        return candidate;
+    }
 };
 
 pub fn fetch_remote_index(backing_allocator: std.mem.Allocator) !RemoteIndex {
@@ -501,3 +518,4 @@ pub const Library = struct {
 // TODO: Use mirrors from "https://ziglang.org/download/community-mirrors.txt"
 // TODO: Verify tarballs with checksum and minisign
 // TODO: Cache index.json and community-mirrors.txt
+// TODO: Avoid rebuilding library and index too many times. Singletons?
