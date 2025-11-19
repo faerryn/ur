@@ -175,7 +175,7 @@ fn shim(allocator: std.mem.Allocator, tio: ur.TioInterface, parent_args: [][:0]u
     var library = try ur.Library.init();
     defer library.deinit();
 
-    const guess = try guessSpec(allocator, tio, args, library) orelse return;
+    const guess = try guessSpec(allocator, tio, parent_args, library) orelse return;
     const spec = guess.spec;
     const args = parent_args[guess.argshift..];
 
