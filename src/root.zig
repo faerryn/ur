@@ -9,7 +9,7 @@ pub const SpecParseOptions = struct {
     allow_no_prefix: bool = false, // without the `zig-` prefix
     allow_from_version: bool = false, // parse as version and infer target
 
-    guess: bool = false, // if true, then all other fields are treated as true
+    allow_and_infer_all: bool = false, // if true, then all other fields are treated as true
 };
 
 // zig-target-version
@@ -21,13 +21,19 @@ pub const Spec = struct {
         try writer.print("zig-{f}-{f}", .{ self.target, self.version });
     }
 
+    pub fn buffered(self: @This(), buffer: *[std.fs.max_name_bytes]u8) ![]u8 {
+        var writer = std.Io.Writer.fixed(buffer);
+        try writer.print("{f}", .{self});
+        return writer.buffered();
+    }
+
     pub fn parse(text: []const u8, options: SpecParseOptions) ParseError!@This() {
-        if (Spec.parse_impl(text, options.guess or options.allow_no_prefix)) |spec| {
+        if (Spec.parse_impl(text, options.allow_and_infer_all or options.allow_no_prefix)) |spec| {
             return spec;
         } else |err| {
             if (err != ParseError.Malformed) return err;
         }
-        if (options.guess or options.allow_from_version) {
+        if (options.allow_and_infer_all or options.allow_from_version) {
             if (Version.parse(text)) |version| {
                 return .{ .target = .NATIVE, .version = version };
             } else |err| {
@@ -112,9 +118,16 @@ pub const Target = struct {
 pub const Version = struct {
     parts: [3]u8,
 
+    fn toU24(self: @This()) u24 {
+        return std.mem.readInt(u24, &self.parts, .big);
+    }
+
+    pub fn eql(self: @This(), other: @This()) bool {
+        return self.toU24() == other.toU24();
+    }
+
     pub fn gt(self: @This(), other: @This()) bool {
-        return std.mem.readInt(u24, &self.parts, .big) >
-            std.mem.readInt(u24, &other.parts, .big);
+        return self.toU24() > other.toU24();
     }
 
     pub fn format(self: @This(), writer: *std.Io.Writer) !void {
@@ -323,7 +336,7 @@ pub fn findBuildVersion(allocator: std.mem.Allocator, dir: std.fs.Dir) !?Version
 
 // Library of local zig installations
 pub const Library = struct {
-    install_dir: std.fs.Dir,
+    data_dir: std.fs.Dir,
     cache_dir: std.fs.Dir,
 
     pub fn init() !@This() {
@@ -331,19 +344,19 @@ pub const Library = struct {
         var fba = std.heap.FixedBufferAllocator.init(&buffer);
         const allocator = fba.allocator();
         return .{
-            .install_dir = try openAppDir(allocator, .data, .{ .iterate = true }),
+            .data_dir = try openAppDir(allocator, .data, .{ .iterate = true }),
             .cache_dir = try openAppDir(allocator, .cache, .{ .iterate = true }),
         };
     }
 
     pub fn deinit(self: *@This()) void {
-        self.install_dir.close();
+        self.data_dir.close();
         self.cache_dir.close();
     }
 
     pub fn list(self: @This(), allocator: std.mem.Allocator) !std.ArrayList(Spec) {
         var specs: std.ArrayList(Spec) = .empty;
-        var dir_it = self.install_dir.iterate();
+        var dir_it = self.data_dir.iterate();
         while (try dir_it.next()) |entry| {
             if (entry.kind != .directory) {
                 continue;
@@ -355,11 +368,18 @@ pub const Library = struct {
     }
 
     pub fn openZigDir(self: @This(), spec: Spec, args: std.fs.Dir.OpenOptions) !std.fs.Dir {
-        var zig_dir_name_buffer = std.mem.zeroes([std.fs.max_path_bytes]u8);
-        var zig_dir_name_writer = std.Io.Writer.fixed(&zig_dir_name_buffer);
-        try zig_dir_name_writer.print("{f}", .{spec});
-        const zig_dir_name = zig_dir_name_writer.buffered();
-        return try self.install_dir.openDir(zig_dir_name, args);
+        var buffer = std.mem.zeroes([std.fs.max_name_bytes]u8);
+        return try self.data_dir.openDir(try spec.buffered(&buffer), args);
+    }
+
+    pub fn is_installed(self: @This(), spec: Spec) !bool {
+        var buffer = std.mem.zeroes([std.fs.max_name_bytes]u8);
+        if (self.data_dir.access(try spec.buffered(&buffer), .{})) {
+            return true;
+        } else |err| {
+            if (err == error.FileNotFound) return false;
+            return err;
+        }
     }
 
     pub fn install_remote_tarball(self: @This(), allocator: std.mem.Allocator, spec: Spec, remote_tarball: RemoteTarball) !void {
@@ -368,7 +388,7 @@ pub const Library = struct {
         try zig_dir_name_writer.print("{f}", .{spec});
         const zig_dir_name = zig_dir_name_writer.buffered();
         // Exit if already installed
-        if (self.install_dir.access(zig_dir_name, .{})) {
+        if (self.data_dir.access(zig_dir_name, .{})) {
             return error.AlreadyInstalled;
         } else |err| {
             if (err != error.FileNotFound) return err;
@@ -404,9 +424,9 @@ pub const Library = struct {
             try writer.interface.flush();
         }
 
-        try self.install_dir.makePath(zig_dir_name);
-        errdefer self.install_dir.deleteTree(zig_dir_name) catch {};
-        var zig_dir = try self.install_dir.openDir(zig_dir_name, .{ .iterate = true });
+        try self.data_dir.makePath(zig_dir_name);
+        errdefer self.data_dir.deleteTree(zig_dir_name) catch {};
+        var zig_dir = try self.data_dir.openDir(zig_dir_name, .{ .iterate = true });
         defer zig_dir.close();
         switch (filetype) {
             .zip => {
