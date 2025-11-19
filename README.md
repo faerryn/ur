@@ -5,7 +5,7 @@ A zig version manager, written in zig.
 A zig version manager, written in zig.
 
 Usage: ur [COMMAND] [<ARGS>]
-Usage: zig [<ARGS>]
+Usage: zig (SPEC)? [<ARGS>]
 
 Commands:
   help                    Display this help message.
@@ -16,12 +16,23 @@ Commands:
   version                 Print the version of ur.
 ```
 
+## Installation
+As of now, you need Zig to compile Ur to install Zig...
+
+We'll have binary releases once Ur is stable enough!
+
+```bash
+git clone https://github.com/faerryn/ur.git
+cd ur/
+zig build --prefix "$HOME/.local" --release=fast 
+```
+
 ## Drop-in replacement
-Instead of typing `ur zig` or using an alias, which is not detectable by some tooling, you can install a symlink or shell script shim!
+Instead of typing `ur zig` or using an alias, which is not detectable by some tooling, you can install a symlink or shell script shim! You can still specify a verison with `zig SPEC ...`.
 
 ### Symlink
 ```bash
-ln -s "$HOME/.local/bin/ur" "$HOME/.local/bin/zig"
+ln -s ur "$HOME/.local/bin/zig"
 ```
 
 ### Shell Shim
