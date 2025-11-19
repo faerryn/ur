@@ -219,12 +219,19 @@ pub fn fetch_remote_index(backing_allocator: std.mem.Allocator) !RemoteIndex {
     return .{ .content = content, .arena = arena };
 }
 
-pub fn http_get(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
+pub fn http_get(allocator: std.mem.Allocator, url_undecorated: []const u8) ![]u8 {
+    var url: std.ArrayList(u8) = .empty;
+    defer url.deinit(allocator);
+    if (std.mem.indexOfScalar(u8, url_undecorated, '?') == null) {
+        try url.print(allocator, "{s}?source=ur", .{url_undecorated});
+    } else {
+        try url.print(allocator, "{s},source=ur", .{url_undecorated});
+    }
     var client = std.http.Client{ .allocator = allocator };
     var writer = std.io.Writer.Allocating.init(allocator);
     const result = try client.fetch(.{
         .response_writer = &writer.writer,
-        .location = .{ .url = url },
+        .location = .{ .url = url.items },
         .method = .GET,
     });
     if (result.status.class() != .success) {
@@ -468,3 +475,7 @@ pub const Library = struct {
         }
     }
 };
+
+// TODO: Use mirrors from "https://ziglang.org/download/community-mirrors.txt"
+// TODO: Verify tarballs with checksum and minisign
+// TODO: Cache index.json and community-mirrors.txt
