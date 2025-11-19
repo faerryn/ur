@@ -1,14 +1,38 @@
+# Ur
 A zig version manager, written in zig.
 
 ```
+A zig version manager, written in zig.
+
 Usage: ur [COMMAND] [<ARGS>]
+Usage: zig [<ARGS>]
 
 Commands:
-  help                              Display this help message.
-  install [VERSION] (TARGET)?       Install VERSION for your architecture, or for TARGET.
-  list (*available|all|installed)?  List versions for your architecture; or all zig versions; or installed zig versions.
-  zig (VERSION)? [<ARGS>]           Run zig with [<ARGS>], parsing build.zig.zon for the version. Override with VERSION.
+  help                    Display this help message.
+  install (SPEC)?         Install SPEC.
+  uninstall [SPEC]        Uninstall SPEC
+  list (all|installed)?   List versions for your architecture, or all versions, or just the ones installed.
+  zig (SPEC)? [<ARGS>]    Run SPEC with [<ARGS>].
+  version                 Print the version of ur.
 ```
+
+## Drop-in replacement
+Instead of typing `ur zig` or using an alias, which is not detectable by some tooling, you can install a symlink or shell script shim!
+
+### Symlink
+```bash
+ln -s "$HOME/.local/bin/ur" "$HOME/.local/bin/zig"
+```
+
+### Shell Shim
+In an executable file named `zig` in you `$PATH`:
+
+```bash
+#!/bin/sh
+exec ur zig "$@"
+```
+
+## Ziggurat
 
 A ziggurat, probably not written in zig.
 
