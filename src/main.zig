@@ -96,12 +96,16 @@ fn list(allocator: std.mem.Allocator, tio: ur.TioInterface, args: [][:0]u8) !voi
     }
 }
 
+const GuessSpecOptions = struct {
+    library: ?ur.Library = null, // match against library if non-null
+    shim_args0: bool = false, // allow non-SPEC args[0]
+};
 const GuessSpecResults = struct {
     spec: ur.Spec,
     argshift: usize,
 };
 // guess the spec for install and shim
-fn guessSpec(allocator: std.mem.Allocator, tio: ur.TioInterface, args: [][:0]u8, opt_library: ?ur.Library) !?GuessSpecResults {
+fn guessSpec(allocator: std.mem.Allocator, tio: ur.TioInterface, args: [][:0]u8, opts: GuessSpecOptions) !?GuessSpecResults {
     // TODO: somehow prepare a (not-slow) fallback default from the remote index
     const build_version = try ur.findBuildVersion(allocator, std.fs.cwd());
     // Check if SPEC is specified
@@ -115,13 +119,15 @@ fn guessSpec(allocator: std.mem.Allocator, tio: ur.TioInterface, args: [][:0]u8,
             return .{ .spec = spec, .argshift = 1 };
         } else |_| {}
         // Attempt to match against library
-        if (opt_library) |library| {
+        if (opts.library) |library| {
             if (try library.match(args[0])) |spec| {
                 return .{ .spec = spec, .argshift = 1 };
             }
         }
-        try tio.err.print("Error: could not parse '{s}'\n", .{args[0]});
-        return null;
+        if (!opts.shim_args0) {
+            try tio.err.print("Error: could not parse '{s}'\n", .{args[0]});
+            return null;
+        }
     }
     // Check if build.zig.zon specifies version
     if (build_version) |version| {
@@ -140,7 +146,7 @@ fn guessSpec(allocator: std.mem.Allocator, tio: ur.TioInterface, args: [][:0]u8,
 }
 
 fn install(allocator: std.mem.Allocator, tio: ur.TioInterface, args: [][:0]u8) !void {
-    const guess = try guessSpec(allocator, tio, args, null) orelse return;
+    const guess = try guessSpec(allocator, tio, args, .{}) orelse return;
     const spec = guess.spec;
     var library = try ur.Library.init();
     defer library.deinit();
@@ -175,7 +181,7 @@ fn shim(allocator: std.mem.Allocator, tio: ur.TioInterface, parent_args: [][:0]u
     var library = try ur.Library.init();
     defer library.deinit();
 
-    const guess = try guessSpec(allocator, tio, parent_args, library) orelse return;
+    const guess = try guessSpec(allocator, tio, parent_args, .{ .library = library, .shim_args0 = true }) orelse return;
     const spec = guess.spec;
     const args = parent_args[guess.argshift..];
 
