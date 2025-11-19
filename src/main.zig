@@ -20,6 +20,9 @@ pub fn main() !void {
 
     const Subcommand = enum { help, version, list, install, zig };
     const subcommand: Subcommand, const argshift: usize = subcommand_block: {
+        if (std.mem.eql(u8, "zig", args[0])) {
+            break :subcommand_block .{ .zig, 1 };
+        }
         if (args.len < 2) {
             break :subcommand_block .{ .help, 0 };
         }
