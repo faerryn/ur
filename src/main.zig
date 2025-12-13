@@ -6,7 +6,9 @@ const config = @import("config");
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
     defer {
-        _ = gpa.detectLeaks();
+        if (builtin.mode == .Debug) {
+            _ = gpa.detectLeaks();
+        }
         _ = gpa.deinit();
     }
     const allocator = gpa.allocator();
@@ -208,7 +210,7 @@ fn shim(allocator: std.mem.Allocator, tio: ur.TioInterface, parent_args: [][:0]u
         // Exit on release with the appropriate exit code
         if (builtin.mode != .Debug) std.process.exit(term.Exited);
     } else {
-        @compileError("No shim mechanism!");
+        @compileError("Error: No shim mechanism available for this target.");
     }
 }
 

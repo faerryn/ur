@@ -1,5 +1,5 @@
 # Ur
-A zig version manager, written in zig.
+A Zig version manager, written in Zig.
 
 ```
 A zig version manager, written in zig.
@@ -28,23 +28,15 @@ zig build --prefix "$HOME/.local" --release=fast
 ```
 
 ## Drop-in replacement
-Instead of typing `ur zig` or using an alias, which is not detectable by some tooling, you can install a symlink or shell script shim! You can still specify a verison with `zig SPEC ...`.
+Instead of typing `ur zig` or using an alias (which is undetectable by some build tools),
+you can install a symlink or shell script shim. You can still specify a version with `zig SPEC ...`.
 
-### Symlink
 ```bash
 ln -s ur "$HOME/.local/bin/zig"
 ```
 
-### Shell Shim
-In an executable file named `zig` in you `$PATH`:
-
-```bash
-#!/bin/sh
-exec ur zig "$@"
-```
-
 ## Ziggurat
 
-A ziggurat, probably not written in zig.
+A ziggurat, probably not written in Zig.
 
 <img width="3366" height="1468" alt="image" src="https://github.com/user-attachments/assets/9e64e9b4-be0a-49b2-854c-68197bcae7b8" />

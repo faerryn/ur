@@ -150,8 +150,9 @@ fn parseDecimal(text: []const u8) ParseError!u8 {
 }
 
 pub const RemoteTarball = struct {
-    url: []u8,
-    checksum: []u8,
+    tarball: []u8,
+    shasum: []u8,
+    size: usize,
 };
 
 pub const RemoteIndexContent = std.AutoArrayHashMap(Spec, RemoteTarball);
@@ -206,11 +207,7 @@ pub fn fetch_remote_index(backing_allocator: std.mem.Allocator) !RemoteIndex {
             const target = Target.parse(kv.key_ptr.*, .{}) catch |err| {
                 if (err == ParseError.Malformed) continue else return err;
             };
-            const remote_tarball = std.json.parseFromValueLeaky(struct {
-                tarball: []u8,
-                shasum: []u8,
-                size: usize,
-            }, allocator, kv.value_ptr.*, .{}) catch |err|
+            const remote_tarball = std.json.parseFromValueLeaky(RemoteTarball, allocator, kv.value_ptr.*, .{}) catch |err|
                 {
                     if (err == error.DuplicateField or err == error.UnknownField or
                         err == error.MissingField or err == error.LengthMismatch or
@@ -219,7 +216,7 @@ pub fn fetch_remote_index(backing_allocator: std.mem.Allocator) !RemoteIndex {
                     else
                         return err;
                 };
-            try content.put(.{ .version = version, .target = target }, .{ .url = remote_tarball.tarball, .checksum = remote_tarball.shasum });
+            try content.put(.{ .version = version, .target = target }, remote_tarball);
         }
     }
 
@@ -417,9 +414,9 @@ pub const Library = struct {
 
         const FileType = enum { zip, tar_xz };
         const filetype: FileType =
-            if (std.ascii.endsWithIgnoreCase(remote_tarball.url, ".zip"))
+            if (std.ascii.endsWithIgnoreCase(remote_tarball.tarball, ".zip"))
                 .zip
-            else if (std.ascii.endsWithIgnoreCase(remote_tarball.url, ".tar.xz"))
+            else if (std.ascii.endsWithIgnoreCase(remote_tarball.tarball, ".tar.xz"))
                 .tar_xz
             else
                 return error.UnsupportedFileType;
@@ -439,7 +436,7 @@ pub const Library = struct {
         if (download) {
             errdefer self.cache_dir.deleteFile(filename) catch {};
             var writer = file.writer(&buffer);
-            const compressed_bytes = try http_get(allocator, remote_tarball.url);
+            const compressed_bytes = try http_get(allocator, remote_tarball.tarball);
             defer allocator.free(compressed_bytes);
             try writer.interface.writeAll(compressed_bytes);
             try writer.interface.flush();
@@ -518,4 +515,3 @@ pub const Library = struct {
 // TODO: Use mirrors from "https://ziglang.org/download/community-mirrors.txt"
 // TODO: Verify tarballs with checksum and minisign
 // TODO: Cache index.json and community-mirrors.txt
-// TODO: Avoid rebuilding library and index too many times. Singletons?
