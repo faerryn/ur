@@ -186,7 +186,8 @@ fn shim(io: std.Io, allocator: std.mem.Allocator, tio: ur.TioInterface, parent_a
     var zig_dir_path = std.mem.zeroes([std.fs.max_path_bytes]u8);
     const zig_dir_path_len = try zig_dir.realPath(io, &zig_dir_path);
 
-    // var buffer = std.mem.zeroes([std.fs.max_path_bytes]u8);
+    tio.out.flush() catch {};
+    tio.err.flush() catch {};
 
     const zig_exe = try std.fs.path.join(allocator, &[_][]const u8{ zig_dir_path[0..zig_dir_path_len], if (builtin.os.tag == .windows) "zig.exe" else "zig" });
     defer allocator.free(zig_exe);
