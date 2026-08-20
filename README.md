@@ -6,6 +6,7 @@ A zig/zls version manager, written in zig.
 
 Usage: ur [COMMAND] [<ARGS>]
 Usage: zig [<ARGS>]
+Usage: zls [<ARGS>]
 
 Commands:
   help                    Display this help message.

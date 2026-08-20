@@ -63,6 +63,7 @@ fn subcommand_help(g: ur.Global) !void {
         \\
         \\Usage: {s} [COMMAND] [<ARGS>]
         \\Usage: zig [<ARGS>]
+        \\Usage: zls [<ARGS>]
         \\
         \\Commands:
         \\  help                    Display this help message.
