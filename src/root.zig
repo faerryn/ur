@@ -6,23 +6,24 @@ const config = @import("config");
 pub const ParseError = error{Malformed} || std.fmt.ParseIntError;
 
 pub const TargetParseOptions = struct {
-    infer_cpu: bool = false, // just parse as os and infer cpu
-    infer_os: bool = false, // just parse as cpu and infer os
+    infer_cpu: ?std.Target.Cpu.Arch = null,
+    infer_os: ?std.Target.Os.Tag = null,
 };
 
 pub const SpecParseOptions = struct {
-    infer_prefix: bool = false, // parse with or without the "zig-" prefix
-    infer_target: bool = false, // just parse as version and infer target
-    infer_version: ?Version = null, // just parse as target and infer version
+    infer_product: ?Product = null,
+    infer_target: ?Target = null,
+    infer_version: ?Version = null,
 };
 
-// zig-target-version
+// product-target@(cpu-os)-version
 pub const Spec = struct {
+    product: Product,
     target: Target,
     version: Version,
 
     pub fn format(self: @This(), writer: *std.Io.Writer) !void {
-        try writer.print("zig-{f}-{f}", .{ self.target, self.version });
+        try writer.print("{f}-{f}-{f}", .{ self.product, self.target, self.version });
     }
 
     pub fn buffered(self: @This(), buffer: *[std.fs.max_name_bytes]u8) ![]u8 {
@@ -36,34 +37,98 @@ pub const Spec = struct {
         spec_opts: SpecParseOptions,
         target_opts: TargetParseOptions,
     ) ParseError!@This() {
-        if (Spec.parse_impl(text, spec_opts.infer_prefix, target_opts)) |spec| {
-            return spec;
-        } else |_| {}
-        if (spec_opts.infer_target) {
-            if (Version.parse(text)) |version| {
-                return .{ .target = .NATIVE, .version = version };
-            } else |_| {}
+        var dash_indices = std.mem.zeroes([3]usize);
+        var dash_count: usize = 0;
+        for (text, 0..) |c, i| {
+            if (c == '-') {
+                if (i == 0 or i == text.len - 1) return ParseError.Malformed;
+                if (dash_count >= dash_indices.len) return ParseError.Malformed;
+                dash_indices[dash_count] = i;
+                dash_count += 1;
+            }
         }
-        if (spec_opts.infer_version) |version| {
-            if (Target.parse(text, target_opts)) |target| {
-                return .{ .target = target, .version = version };
-            } else |_| {}
-        }
-        return ParseError.Malformed;
-    }
 
-    fn parse_impl(text: []const u8, infer_prefix: bool, target_opts: TargetParseOptions) !@This() {
-        const firstDash = std.mem.indexOfScalar(u8, text, '-') orelse return ParseError.Malformed;
-        const lastDash = std.mem.lastIndexOfScalar(u8, text, '-') orelse return ParseError.Malformed;
-        const version = try Version.parse(text[lastDash + 1 ..]);
-        const has_prefix = std.mem.eql(u8, "zig", text[0..firstDash]);
-        if (!has_prefix and !infer_prefix) return ParseError.Malformed;
-        const target_str = if (has_prefix) text[firstDash + 1 .. lastDash] else text[0..firstDash];
-        const target = try Target.parse(target_str, target_opts);
+        const spans_count: usize = dash_count + 1;
+        var spans = std.mem.zeroes([4]struct { start: usize, stop: usize });
+        for (0..spans_count) |i| {
+            spans[i].start = if (i == 0) 0 else (dash_indices[i - 1] + 1);
+            spans[i].stop = if (i == dash_count) text.len else dash_indices[i];
+        }
+
+        var cursor: usize = 0;
+
+        const product = blk: {
+            if (cursor < spans_count) {
+                if (Product.parse(text[spans[cursor].start..spans[cursor].stop])) |p| {
+                    cursor += 1;
+                    break :blk p;
+                } else |_| {}
+            }
+            if (spec_opts.infer_product) |p| break :blk p;
+            return ParseError.Malformed;
+        };
+
+        const target = blk: {
+            if (cursor + 1 < spans_count) {
+                if (Target.parse(
+                    text[spans[cursor].start..spans[cursor + 1].stop],
+                    target_opts,
+                )) |p| {
+                    cursor += 2;
+                    break :blk p;
+                } else |_| {}
+            } else if (cursor < spans_count) {
+                if (Target.parse(
+                    text[spans[cursor].start..spans[cursor].stop],
+                    target_opts,
+                )) |p| {
+                    cursor += 1;
+                    break :blk p;
+                } else |_| {}
+            }
+            if (spec_opts.infer_target) |t| break :blk t;
+            return ParseError.Malformed;
+        };
+
+        const version = blk: {
+            if (cursor < spans_count) {
+                if (Version.parse(text[spans[cursor].start..spans[cursor].stop])) |p| {
+                    cursor += 1;
+                    break :blk p;
+                } else |_| {}
+            }
+            if (spec_opts.infer_version) |v| break :blk v;
+            return ParseError.Malformed;
+        };
+
+        if (cursor < spans_count) return ParseError.Malformed;
+
         return .{
+            .product = product,
             .target = target,
             .version = version,
         };
+    }
+};
+
+pub const Product = enum {
+    Zig,
+    Zls,
+
+    pub fn format(self: @This(), writer: *std.Io.Writer) !void {
+        try writer.print("{s}", .{switch (self) {
+            .Zig => "zig",
+            .Zls => "zls",
+        }});
+    }
+    pub fn parse(text: []const u8) ParseError!@This() {
+        if (std.mem.eql(u8, "zig", text)) {
+            return .Zig;
+        }
+        if (std.mem.eql(u8, "zls", text)) {
+            return .Zls;
+        }
+        return ParseError.Malformed;
     }
 };
 
@@ -99,8 +164,8 @@ pub const Target = struct {
             const try_cpu = std.meta.stringToEnum(std.Target.Cpu.Arch, text);
             const try_os = std.meta.stringToEnum(std.Target.Os.Tag, text);
             if (try_cpu == null and try_os == null) return ParseError.Malformed;
-            const cpu = try_cpu orelse if (opts.infer_cpu) NATIVE.cpu else return ParseError.Malformed;
-            const os = try_os orelse if (opts.infer_os) NATIVE.os else return ParseError.Malformed;
+            const cpu = try_cpu orelse if (opts.infer_cpu) |cpu| cpu else return ParseError.Malformed;
+            const os = try_os orelse if (opts.infer_os) |os| os else return ParseError.Malformed;
             return .{ .cpu = cpu, .os = os };
         }
     }
@@ -158,11 +223,16 @@ pub const RemoteTarball = struct {
 pub const RemoteIndexContent = std.AutoHashMap(Spec, RemoteTarball);
 
 pub const RemoteIndex = struct {
-    arena: std.heap.ArenaAllocator,
     content: RemoteIndexContent,
 
+    pub fn init(g: Global) @This() {
+        return .{
+            .content = RemoteIndexContent.init(g.init.gpa),
+        };
+    }
+
     pub fn deinit(self: *@This()) void {
-        self.arena.deinit();
+        self.content.deinit();
     }
 
     // Returns null if content is empty (should be unlikely)
@@ -182,49 +252,55 @@ pub const RemoteIndex = struct {
         }
         return candidate;
     }
-};
 
-pub fn fetch_remote_index(io: std.Io, backing_allocator: std.mem.Allocator) !RemoteIndex {
-    var arena = std.heap.ArenaAllocator.init(backing_allocator);
-    errdefer arena.deinit();
-    const allocator = arena.allocator();
+    pub fn fetch_remote_index(self: *@This(), g: Global, product: Product, url: []const u8) !void {
+        var arena = std.heap.ArenaAllocator.init(g.init.gpa);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        const s = try http_get(g, allocator, url);
+        // g.tio.err.print("{s}:\n{s}\n", .{url, s}) catch {};
+        const index_value = try std.json.parseFromSliceLeaky(std.json.Value, allocator, s, .{});
 
-    var content = RemoteIndexContent.init(allocator);
-
-    const s = try http_get(io, allocator, "https://ziglang.org/download/index.json");
-
-    const index_value = try std.json.parseFromSliceLeaky(std.json.Value, allocator, s, .{});
-
-    var index_it = switch (index_value) {
-        .object => |value| value.iterator(),
-        else => return ParseError.Malformed,
-    };
-    while (index_it.next()) |index_kv| {
-        // TODO: handle master branch
-        if (std.mem.eql(u8, "master", index_kv.key_ptr.*)) continue;
-        const version = try Version.parse(index_kv.key_ptr.*);
-        var version_it = index_kv.value_ptr.object.iterator();
-        while (version_it.next()) |kv| {
-            const target = Target.parse(kv.key_ptr.*, .{}) catch |err| {
-                if (err == ParseError.Malformed) continue else return err;
-            };
-            const remote_tarball = std.json.parseFromValueLeaky(RemoteTarball, allocator, kv.value_ptr.*, .{}) catch |err|
-                {
-                    if (err == error.DuplicateField or err == error.UnknownField or
-                        err == error.MissingField or err == error.LengthMismatch or
-                        err == error.UnexpectedToken)
-                        continue
-                    else
-                        return err;
+        var index_it = switch (index_value) {
+            .object => |value| value.iterator(),
+            else => return ParseError.Malformed,
+        };
+        while (index_it.next()) |index_kv| {
+            // TODO: handle master branch
+            if (std.mem.eql(u8, "master", index_kv.key_ptr.*)) continue;
+            const version = try Version.parse(index_kv.key_ptr.*);
+            var version_it = index_kv.value_ptr.object.iterator();
+            while (version_it.next()) |kv| {
+                const target = Target.parse(kv.key_ptr.*, .{}) catch |err| {
+                    if (err == ParseError.Malformed) continue else return err;
                 };
-            try content.put(.{ .version = version, .target = target }, remote_tarball);
+                const spec = Spec{ .product = product, .version = version, .target = target };
+                const remote_tarball = std.json.parseFromValueLeaky(RemoteTarball, allocator, kv.value_ptr.*, .{}) catch |err|
+                    {
+                        if (err == error.DuplicateField or err == error.UnknownField or
+                            err == error.MissingField or err == error.LengthMismatch or
+                            err == error.UnexpectedToken)
+                            continue
+                        else
+                            return err;
+                    };
+
+                const shasum = try g.init.gpa.dupe(u8, remote_tarball.shasum);
+                errdefer g.init.gpa.free(shasum);
+                const tarball = try g.init.gpa.dupe(u8, remote_tarball.tarball);
+                errdefer g.init.gpa.free(tarball);
+
+                try self.content.put(spec, .{
+                    .size = remote_tarball.size,
+                    .shasum = shasum,
+                    .tarball = tarball,
+                });
+            }
         }
     }
+};
 
-    return .{ .content = content, .arena = arena };
-}
-
-pub fn http_get(io: std.Io, allocator: std.mem.Allocator, url_undecorated: []const u8) ![]u8 {
+pub fn http_get(g: Global, allocator: std.mem.Allocator, url_undecorated: []const u8) ![]u8 {
     var url: std.ArrayList(u8) = .empty;
     defer url.deinit(allocator);
     if (std.mem.indexOfScalar(u8, url_undecorated, '?') == null) {
@@ -232,7 +308,7 @@ pub fn http_get(io: std.Io, allocator: std.mem.Allocator, url_undecorated: []con
     } else {
         try url.print(allocator, "{s},source=ur", .{url_undecorated});
     }
-    var client = std.http.Client{ .io = io, .allocator = allocator };
+    var client = std.http.Client{ .io = g.init.io, .allocator = allocator };
     var writer = std.Io.Writer.Allocating.init(allocator);
     const result = try client.fetch(.{
         .response_writer = &writer.writer,
@@ -245,25 +321,181 @@ pub fn http_get(io: std.Io, allocator: std.mem.Allocator, url_undecorated: []con
     return try writer.toOwnedSlice();
 }
 
-fn getAppPath(io: std.Io, allocator: std.mem.Allocator, environ: *std.process.Environ.Map, known_folder: known_folders.KnownFolder) ![]const u8 {
+fn getAppPath(g: Global, known_folder: known_folders.KnownFolder) ![]const u8 {
     const parent_path =
-        try known_folders.getPath(io, allocator, environ, known_folder) orelse return error.NotFound;
-    defer allocator.free(parent_path);
+        try known_folders.getPath(g.init.io, g.init.gpa, g.init.environ_map, known_folder) orelse return error.NotFound;
+    defer g.init.gpa.free(parent_path);
     const sub_path = switch (builtin.os.tag) {
         .macos => "com.faerryn." ++ config.name,
         else => config.name,
     };
     const path_parts = &[_][]const u8{ parent_path, sub_path };
-    return try std.fs.path.join(allocator, path_parts);
+    return try std.fs.path.join(g.init.gpa, path_parts);
 }
-fn openAppDir(io: std.Io, allocator: std.mem.Allocator, environ: *std.process.Environ.Map, known_folder: known_folders.KnownFolder, args: std.Io.Dir.OpenOptions) !std.Io.Dir {
-    const path = try getAppPath(io, allocator, environ, known_folder);
-    defer allocator.free(path);
-    std.Io.Dir.cwd().createDirPath(io, path) catch |err| {
+fn openAppDir(g: Global, known_folder: known_folders.KnownFolder, args: std.Io.Dir.OpenOptions) !std.Io.Dir {
+    const path = try getAppPath(g, known_folder);
+    defer g.init.gpa.free(path);
+    std.Io.Dir.cwd().createDirPath(g.init.io, path) catch |err| {
         if (err != error.PathAlreadyExists) return err;
     };
-    return try std.Io.Dir.cwd().openDir(io, path, args);
+    return try std.Io.Dir.cwd().openDir(g.init.io, path, args);
 }
+
+// Library of local program installations
+pub const Library = struct {
+    data_dir: std.Io.Dir,
+    cache_dir: std.Io.Dir,
+
+    pub fn init(g: Global) !@This() {
+        return .{
+            .data_dir = try openAppDir(g, .data, .{ .iterate = true }),
+            .cache_dir = try openAppDir(g, .cache, .{ .iterate = true }),
+        };
+    }
+
+    pub fn deinit(self: *@This(), g: Global) void {
+        self.data_dir.close(g.init.io);
+        self.cache_dir.close(g.init.io);
+    }
+
+    pub const Iterator = struct {
+        it: std.Io.Dir.Iterator,
+        pub fn next(self: *@This(), g: Global) !?Spec {
+            while (try self.it.next(g.init.io)) |entry| {
+                if (entry.kind != .directory) continue;
+                const spec = Spec.parse(entry.name, .{}, .{}) catch continue;
+                return spec;
+            }
+            return null;
+        }
+    };
+
+    pub fn iterate(self: @This()) Iterator {
+        return .{ .it = self.data_dir.iterate() };
+    }
+
+    pub fn openSpecDir(self: @This(), g: Global, spec: Spec, args: std.Io.Dir.OpenOptions) !std.Io.Dir {
+        var buffer = std.mem.zeroes([std.fs.max_name_bytes]u8);
+        return try self.data_dir.openDir(g.init.io, try spec.buffered(&buffer), args);
+    }
+
+    pub fn isInstalled(self: @This(), g: Global, spec: Spec) !bool {
+        var buffer = std.mem.zeroes([std.fs.max_name_bytes]u8);
+        if (self.data_dir.access(g.init.io, try spec.buffered(&buffer), .{})) {
+            return true;
+        } else |err| {
+            if (err == error.FileNotFound) return false;
+            return err;
+        }
+    }
+
+    pub fn installRemoteTarball(self: @This(), g: Global, spec: Spec, remote_tarball: RemoteTarball) !void {
+        var zig_dir_name_buffer = std.mem.zeroes([std.fs.max_path_bytes]u8);
+        var zig_dir_name_writer = std.Io.Writer.fixed(&zig_dir_name_buffer);
+        try zig_dir_name_writer.print("{f}", .{spec});
+        const zig_dir_name = zig_dir_name_writer.buffered();
+        // Exit if already installed
+        if (self.data_dir.access(g.init.io, zig_dir_name, .{})) {
+            return error.AlreadyInstalled;
+        } else |err| {
+            if (err != error.FileNotFound) return err;
+        }
+
+        const FileType = enum { zip, tar_xz };
+        const filetype: FileType =
+            if (std.ascii.endsWithIgnoreCase(remote_tarball.tarball, ".zip"))
+                .zip
+            else if (std.ascii.endsWithIgnoreCase(remote_tarball.tarball, ".tar.xz"))
+                .tar_xz
+            else
+                return error.UnsupportedFileType;
+        switch (filetype) {
+            .zip => try zig_dir_name_writer.print(".zip", .{}),
+            .tar_xz => try zig_dir_name_writer.print(".tar.xz", .{}),
+        }
+        const filename = zig_dir_name_writer.buffered();
+        var download = true;
+        var file: std.Io.File = self.cache_dir.createFile(g.init.io, filename, .{ .read = true, .exclusive = true }) catch |err| file_block: {
+            if (err != error.PathAlreadyExists) return err;
+            download = false;
+            break :file_block try self.cache_dir.openFile(g.init.io, filename, .{});
+        };
+        defer file.close(g.init.io);
+        var buffer = std.mem.zeroes([4096]u8);
+        if (download) {
+            errdefer self.cache_dir.deleteFile(g.init.io, filename) catch {};
+            var writer = file.writer(g.init.io, &buffer);
+            const compressed_bytes = try http_get(g, g.init.gpa, remote_tarball.tarball);
+            defer g.init.gpa.free(compressed_bytes);
+            try writer.interface.writeAll(compressed_bytes);
+            try writer.interface.flush();
+        }
+
+        try self.data_dir.createDirPath(g.init.io, zig_dir_name);
+        errdefer self.data_dir.deleteTree(g.init.io, zig_dir_name) catch {};
+
+        var zig_dir = try self.data_dir.openDir(g.init.io, zig_dir_name, .{ .iterate = true });
+        defer zig_dir.close(g.init.io);
+        var file_reader = file.reader(g.init.io, &buffer);
+        switch (filetype) {
+            .zip => {
+                try std.zip.extract(zig_dir, &file_reader, .{});
+                if (spec.product == .Zig) {
+                    var it = zig_dir.iterate();
+                    const mono_entry = try it.next(g.init.io) orelse return error.EmptyZip;
+                    defer zig_dir.deleteDir(g.init.io, mono_entry.name) catch g.tio.err.print("error: Failed to delete {s}\n", .{mono_entry.name}) catch {};
+                    {
+                        var mono_dir = try zig_dir.openDir(g.init.io, mono_entry.name, .{ .iterate = true });
+                        defer mono_dir.close(g.init.io);
+                        var it2 = mono_dir.iterate();
+                        while (try it2.next(g.init.io)) |entry| {
+                            try mono_dir.rename(entry.name, zig_dir, entry.name, g.init.io);
+                        }
+                    }
+                }
+            },
+            .tar_xz => {
+                const buffer2 = try g.init.gpa.alloc(u8, 4096);
+                var decompress = try std.compress.xz.Decompress.init(&file_reader.interface, g.init.gpa, buffer2);
+                defer decompress.deinit();
+                try std.tar.pipeToFileSystem(g.init.io, zig_dir, &decompress.reader, .{ .strip_components = switch (spec.product) {
+                    .Zig => 1,
+                    .Zls => 0,
+                } });
+            },
+        }
+    }
+
+    // TODO: consider returning errors instead of an option?
+    pub fn match(self: @This(), g: Global, text: []const u8) !?Spec {
+        const try_target = Target.parse(text, .{ .infer_cpu = Target.NATIVE.cpu, .infer_os = Target.NATIVE.os }) catch null;
+        const try_version = Version.parse(text) catch null;
+        if (try_target == null and try_version == null) return null;
+        var candidate: ?Spec = null;
+
+        var it = self.iterate();
+        while (try it.next(g)) |spec| {
+            if (try_target) |target| {
+                if (target.eql(spec.target)) {
+                    if (candidate) |_| return null;
+                    candidate = spec;
+                }
+            }
+            if (try_version) |version| {
+                if (version.eql(spec.version)) {
+                    if (candidate) |_| return null;
+                    candidate = spec;
+                }
+            }
+        }
+        return candidate;
+    }
+};
+
+pub const Global = struct {
+    init: std.process.Init,
+    tio: TioInterface,
+};
 
 pub fn Tio(comptime out_buf_size: usize, comptime err_buf_size: usize) type {
     return struct {
@@ -314,18 +546,18 @@ pub const TioInterface = struct {
     err: *std.Io.Writer,
 };
 
-pub fn findBuildVersion(io: std.Io, allocator: std.mem.Allocator, dir: std.Io.Dir) !?Version {
-    if (dir.openFile(io, "build.zig.zon", .{})) |file| {
-        defer file.close(io);
-        const stat = try file.stat(io);
+pub fn findBuildVersion(g: Global, dir: std.Io.Dir) !?Version {
+    if (dir.openFile(g.init.io, "build.zig.zon", .{})) |file| {
+        defer file.close(g.init.io);
+        const stat = try file.stat(g.init.io);
         var buffer = std.mem.zeroes([4096]u8);
-        var reader = file.reader(io, &buffer);
-        var source = try allocator.alloc(u8, stat.size + 1);
-        defer allocator.free(source);
+        var reader = file.reader(g.init.io, &buffer);
+        var source = try g.init.gpa.alloc(u8, stat.size + 1);
+        defer g.init.gpa.free(source);
         @memset(source, 0);
         try reader.interface.readSliceAll(source[0..stat.size]);
-        if (std.zon.parse.fromSliceAlloc(struct { minimum_zig_version: []const u8 }, allocator, source[0..stat.size :0], null, .{ .ignore_unknown_fields = true })) |zon| {
-            defer allocator.free(zon.minimum_zig_version);
+        if (std.zon.parse.fromSliceAlloc(struct { minimum_zig_version: []const u8 }, g.init.gpa, source[0..stat.size :0], null, .{ .ignore_unknown_fields = true })) |zon| {
+            defer g.init.gpa.free(zon.minimum_zig_version);
             if (Version.parse(zon.minimum_zig_version)) |version| {
                 return version;
             } else |_| {}
@@ -340,167 +572,22 @@ pub fn findBuildVersion(io: std.Io, allocator: std.mem.Allocator, dir: std.Io.Di
         }
     }
 
-    var parent = try dir.openDir(io, "..", .{});
-    defer parent.close(io);
+    var parent = dir.openDir(g.init.io, "..", .{}) catch |err| {
+        if (err != error.FileNotFound) {
+            return err;
+        }
+        return null;
+    };
+    defer parent.close(g.init.io);
     var dir_buf = std.mem.zeroes([std.fs.max_path_bytes]u8);
     var parent_buf = std.mem.zeroes([std.fs.max_path_bytes]u8);
-    const dir_len = try dir.realPath(io, &dir_buf);
-    const parent_len = try parent.realPath(io, &parent_buf);
+    const dir_len = try dir.realPath(g.init.io, &dir_buf);
+    const parent_len = try parent.realPath(g.init.io, &parent_buf);
     if (std.mem.eql(u8, dir_buf[0..dir_len], parent_buf[0..parent_len])) {
         return null;
     }
-    return try findBuildVersion(io, allocator, parent);
+    return try findBuildVersion(g, parent);
 }
-
-// Library of local zig installations
-pub const Library = struct {
-    io: std.Io,
-    data_dir: std.Io.Dir,
-    cache_dir: std.Io.Dir,
-
-    pub fn init(io: std.Io, environ: *std.process.Environ.Map) !@This() {
-        var buffer = std.mem.zeroes([std.fs.max_path_bytes]u8);
-        var fba = std.heap.FixedBufferAllocator.init(&buffer);
-        const allocator = fba.allocator();
-        return .{
-            .io = io,
-            .data_dir = try openAppDir(io, allocator, environ, .data, .{ .iterate = true }),
-            .cache_dir = try openAppDir(io, allocator, environ, .cache, .{ .iterate = true }),
-        };
-    }
-
-    pub fn deinit(self: *@This()) void {
-        self.data_dir.close(self.io);
-        self.cache_dir.close(self.io);
-    }
-
-    pub const Iterator = struct {
-        io: std.Io,
-        it: std.Io.Dir.Iterator,
-        pub fn next(self: *@This()) !?Spec {
-            while (try self.it.next(self.io)) |entry| {
-                if (entry.kind != .directory) continue;
-                const spec = Spec.parse(entry.name, .{}, .{}) catch continue;
-                return spec;
-            }
-            return null;
-        }
-    };
-
-    pub fn iterate(self: @This()) Iterator {
-        return .{ .io = self.io, .it = self.data_dir.iterate() };
-    }
-
-    pub fn openZigDir(self: @This(), spec: Spec, args: std.Io.Dir.OpenOptions) !std.Io.Dir {
-        var buffer = std.mem.zeroes([std.fs.max_name_bytes]u8);
-        return try self.data_dir.openDir(self.io, try spec.buffered(&buffer), args);
-    }
-
-    pub fn isInstalled(self: @This(), spec: Spec) !bool {
-        var buffer = std.mem.zeroes([std.fs.max_name_bytes]u8);
-        if (self.data_dir.access(self.io, try spec.buffered(&buffer), .{})) {
-            return true;
-        } else |err| {
-            if (err == error.FileNotFound) return false;
-            return err;
-        }
-    }
-
-    pub fn installRemoteTarball(self: @This(), allocator: std.mem.Allocator, spec: Spec, remote_tarball: RemoteTarball) !void {
-        var zig_dir_name_buffer = std.mem.zeroes([std.fs.max_path_bytes]u8);
-        var zig_dir_name_writer = std.Io.Writer.fixed(&zig_dir_name_buffer);
-        try zig_dir_name_writer.print("{f}", .{spec});
-        const zig_dir_name = zig_dir_name_writer.buffered();
-        // Exit if already installed
-        if (self.data_dir.access(self.io, zig_dir_name, .{})) {
-            return error.AlreadyInstalled;
-        } else |err| {
-            if (err != error.FileNotFound) return err;
-        }
-
-        const FileType = enum { zip, tar_xz };
-        const filetype: FileType =
-            if (std.ascii.endsWithIgnoreCase(remote_tarball.tarball, ".zip"))
-                .zip
-            else if (std.ascii.endsWithIgnoreCase(remote_tarball.tarball, ".tar.xz"))
-                .tar_xz
-            else
-                return error.UnsupportedFileType;
-        switch (filetype) {
-            .zip => try zig_dir_name_writer.print(".zip", .{}),
-            .tar_xz => try zig_dir_name_writer.print(".tar.xz", .{}),
-        }
-        const filename = zig_dir_name_writer.buffered();
-        var download = true;
-        var file: std.Io.File = self.cache_dir.createFile(self.io, filename, .{ .read = true, .exclusive = true }) catch |err| file_block: {
-            if (err != error.PathAlreadyExists) return err;
-            download = false;
-            break :file_block try self.cache_dir.openFile(self.io, filename, .{});
-        };
-        defer file.close(self.io);
-        var buffer = std.mem.zeroes([4096]u8);
-        if (download) {
-            errdefer self.cache_dir.deleteFile(self.io, filename) catch {};
-            var writer = file.writer(self.io, &buffer);
-            const compressed_bytes = try http_get(self.io, allocator, remote_tarball.tarball);
-            defer allocator.free(compressed_bytes);
-            try writer.interface.writeAll(compressed_bytes);
-            try writer.interface.flush();
-        }
-
-        try self.data_dir.createDirPath(self.io, zig_dir_name);
-        errdefer self.data_dir.deleteTree(self.io, zig_dir_name) catch {};
-
-        var zig_dir = try self.data_dir.openDir(self.io, zig_dir_name, .{ .iterate = true });
-        defer zig_dir.close(self.io);
-        var file_reader = file.reader(self.io, &buffer);
-        switch (filetype) {
-            .zip => {
-                try std.zip.extract(zig_dir, &file_reader, .{});
-                var it = zig_dir.iterate();
-                const mono_entry = try it.next(self.io) orelse return error.EmptyZip;
-                defer zig_dir.deleteTree(self.io, mono_entry.name) catch {};
-                var mono_dir = try zig_dir.openDir(self.io, mono_entry.name, .{ .iterate = true });
-                defer mono_dir.close(self.io);
-                it = mono_dir.iterate();
-                while (try it.next(self.io)) |entry| {
-                    try mono_dir.rename(entry.name, zig_dir, entry.name, self.io);
-                }
-            },
-            .tar_xz => {
-                const buffer2 = try allocator.alloc(u8, 4096);
-                var decompress = try std.compress.xz.Decompress.init(&file_reader.interface, allocator, buffer2);
-                defer decompress.deinit();
-                try std.tar.pipeToFileSystem(self.io, zig_dir, &decompress.reader, .{ .strip_components = 1 });
-            },
-        }
-    }
-
-    // TODO: consider returning errors instead of an option?
-    pub fn match(self: @This(), text: []const u8) !?Spec {
-        const try_target = Target.parse(text, .{ .infer_cpu = true, .infer_os = true }) catch null;
-        const try_version = Version.parse(text) catch null;
-        if (try_target == null and try_version == null) return null;
-        var candidate: ?Spec = null;
-
-        var it = self.iterate();
-        while (try it.next()) |spec| {
-            if (try_target) |target| {
-                if (target.eql(spec.target)) {
-                    if (candidate) |_| return null;
-                    candidate = spec;
-                }
-            }
-            if (try_version) |version| {
-                if (version.eql(spec.version)) {
-                    if (candidate) |_| return null;
-                    candidate = spec;
-                }
-            }
-        }
-        return candidate;
-    }
-};
 
 // TODO: Use mirrors from "https://ziglang.org/download/community-mirrors.txt"
 // TODO: Verify tarballs with checksum and minisign

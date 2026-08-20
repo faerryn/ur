@@ -8,46 +8,58 @@ pub fn main(init: std.process.Init) void {
     defer tio_context.deinit();
     const tio = tio_context.interface();
 
-    app(init, tio) catch |err| {
+    start(.{ .tio = tio, .init = init }) catch |err| {
         tio.err.print("error: {}\n", .{ .err = err }) catch {};
     };
 }
 
-fn app(init: std.process.Init, tio: ur.TioInterface) !void {
-    var arena = std.heap.ArenaAllocator.init(init.gpa);
+fn start(g: ur.Global) !void {
+    var arena = std.heap.ArenaAllocator.init(g.init.gpa);
     defer arena.deinit();
-    const arena_allocator = arena.allocator();
-    const args = try init.minimal.args.toSlice(arena_allocator);
+    const args = try g.init.minimal.args.toSlice(arena.allocator());
 
-    var library = try ur.Library.init(init.io, init.environ_map);
-    defer library.deinit();
+    var library = try ur.Library.init(g);
+    defer library.deinit(g);
 
-    const Subcommand = enum { help, version, list, install, uninstall, zig };
+    var index = ur.RemoteIndex.init(g);
+    try index.fetch_remote_index(g, .Zig, "https://ziglang.org/download/index.json");
+    try index.fetch_remote_index(g, .Zls, "https://builds.zigtools.org/index.json");
+    defer index.deinit();
+
+    const default_version =
+        if (try ur.findBuildVersion(g, std.Io.Dir.cwd())) |v| v else if (index.defaultRemoteSpec()) |spec| spec.version else null;
+    const spec_opts = ur.SpecParseOptions{ .infer_target = ur.Target.NATIVE, .infer_version = default_version };
+    const target_opts = ur.TargetParseOptions{ .infer_cpu = ur.Target.NATIVE.cpu, .infer_os = ur.Target.NATIVE.os };
+    if (ur.Spec.parse(args[0], spec_opts, target_opts)) |spec| {
+        return shim(g, &library, &index, spec, args[1..]);
+    } else |_| if (args.len > 1) {
+        if (ur.Spec.parse(args[1], spec_opts, target_opts)) |spec| {
+            return shim(g, &library, &index, spec, args[2..]);
+        } else |_| {}
+    }
+
+    const Subcommand = enum { help, version, list, install, uninstall };
     const subcommand: Subcommand, const argshift: usize = subcommand_block: {
-        if (std.mem.eql(u8, "zig", args[0])) {
-            break :subcommand_block .{ .zig, 1 };
-        }
         if (args.len < 2) {
             break :subcommand_block .{ .help, 0 };
         }
         if (std.meta.stringToEnum(Subcommand, args[1])) |subcommand| {
-            break :subcommand_block .{ subcommand, 2 };
+            break :subcommand_block .{ subcommand, 1 };
         }
         break :subcommand_block .{ .help, 0 };
     };
     switch (subcommand) {
-        .help => try help(tio),
-        .version => try print_version(tio),
-        .list => try list(init.io, init.gpa, tio, args[argshift..], &library),
-        .install => try install(init.io, init.gpa, tio, args[argshift..], &library),
-        .uninstall => try uninstall(init.io, tio, args[argshift..], &library),
-        .zig => try shim(init.io, init.gpa, tio, args[argshift..], &library),
+        .help => try subcommand_help(g),
+        .version => try subcommand_version(g),
+        .list => try subcommand_list(g, &library, &index, args[argshift..]),
+        .install => try subcommand_install(g, &library, &index, default_version, args[argshift..]),
+        .uninstall => try subcommand_uninstall(g, &library, args[argshift..]),
     }
 }
 
-fn help(tio: ur.TioInterface) !void {
-    try tio.out.print(
-        \\A zig version manager, written in zig.
+fn subcommand_help(g: ur.Global) !void {
+    try g.tio.out.print(
+        \\A zig/zls version manager, written in zig.
         \\
         \\Usage: {s} [COMMAND] [<ARGS>]
         \\Usage: zig [<ARGS>]
@@ -57,179 +69,174 @@ fn help(tio: ur.TioInterface) !void {
         \\  install (SPEC)?         Install SPEC.
         \\  uninstall [SPEC]        Uninstall SPEC
         \\  list (all|installed)?   List versions for your architecture, or all versions, or just the ones installed.
-        \\  zig (SPEC)? [<ARGS>]    Run SPEC with [<ARGS>].
+        \\  (SPEC)? [<ARGS>]        Run program specified by SPEC, passing [<ARGS>].
         \\  version                 Print the version of {s}.
+        \\
+        \\Specs:
+        \\  (zig|zls)?(-ARCH)?(-OS)?(-VERSION)?
         \\
     , .{ config.name, config.name });
 }
 
-fn print_version(tio: ur.TioInterface) !void {
-    try tio.out.print("{s} {s}\n", .{ config.name, config.version });
+fn subcommand_version(g: ur.Global) !void {
+    try g.tio.out.print("{s} {s}\n", .{ config.name, config.version });
 }
 
-fn list(io: std.Io, allocator: std.mem.Allocator, tio: ur.TioInterface, args: []const [:0]const u8, library: *ur.Library) !void {
+fn subcommand_list(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex, args: []const [:0]const u8) !void {
     const subcommand = subcommand_block: {
-        if (args.len > 0) {
-            if (std.meta.stringToEnum(enum { available, all, installed }, args[0])) |subcommand| {
+        if (args.len > 1) {
+            if (std.meta.stringToEnum(enum { available, all, installed }, args[1])) |subcommand| {
                 break :subcommand_block subcommand;
             }
-            try help(tio);
+            try subcommand_help(g);
             return;
         }
         break :subcommand_block .available;
     };
     switch (subcommand) {
         .all, .available => {
-            var index = try ur.fetch_remote_index(io, allocator);
-            defer index.deinit();
             var it = index.content.iterator();
             while (it.next()) |kv| {
                 if (subcommand == .all or kv.key_ptr.target.isNative())
-                    try tio.out.print("{f}\n", .{kv.key_ptr});
+                    try g.tio.out.print("{f}\n", .{kv.key_ptr});
             }
-            try tio.out.flush();
+            try g.tio.out.flush();
         },
         .installed => {
             var it = library.iterate();
-            while (try it.next()) |spec| {
-                try tio.out.print("{f}\n", .{spec});
+            while (try it.next(g)) |spec| {
+                try g.tio.out.print("{f}\n", .{spec});
             }
         },
     }
 }
 
-const GuessSpecOptions = struct {
-    library: ?*ur.Library = null, // match against library if non-null
-    shim_args0: bool = false, // allow non-SPEC args[0]
-};
-const GuessSpecResults = struct {
-    spec: ur.Spec,
-    argshift: usize,
-};
-// guess the spec for install and shim
-fn guessSpec(io: std.Io, allocator: std.mem.Allocator, tio: ur.TioInterface, args: []const [:0]const u8, opts: GuessSpecOptions) !?GuessSpecResults {
-    // TODO: somehow prepare a (not-slow) fallback default from the remote index
-    const build_version = try ur.findBuildVersion(io, allocator, std.Io.Dir.cwd());
-    // Check if SPEC is specified
-    if (args.len > 0) {
-        // TODO: Infer version somehow
-        if (ur.Spec.parse(
-            args[0],
-            .{ .infer_prefix = true, .infer_target = true, .infer_version = build_version },
-            .{ .infer_cpu = true, .infer_os = true },
-        )) |spec| {
-            return .{ .spec = spec, .argshift = 1 };
-        } else |_| {}
-        // Attempt to match against library
-        if (opts.library) |library| {
-            if (try library.match(args[0])) |spec| {
-                return .{ .spec = spec, .argshift = 1 };
-            }
+fn subcommand_install(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex, default_version: ?ur.Version, args: []const [:0]const u8) !void {
+    const spec = blk: {
+        // Check if SPEC is specified
+        if (args.len > 1) {
+            // TODO: Infer version somehow
+            if (ur.Spec.parse(
+                args[1],
+                .{ .infer_product = .Zig, .infer_target = ur.Target.NATIVE, .infer_version = default_version },
+                .{ .infer_cpu = ur.Target.NATIVE.cpu, .infer_os = ur.Target.NATIVE.os },
+            )) |spec| {
+                break :blk spec;
+            } else |_| {}
+            try g.tio.err.print("Error: could not parse '{s}'\n", .{args[0]});
+            return;
         }
-        if (!opts.shim_args0) {
-            try tio.err.print("Error: could not parse '{s}'\n", .{args[0]});
-            return null;
+        if (default_version) |version| {
+            // Use default version if available
+            break :blk ur.Spec{
+                .product = .Zig,
+                .target = ur.Target.NATIVE,
+                .version = version,
+            };
         }
-    }
-    // Check if build.zig.zon specifies version
-    if (build_version) |version| {
-        return .{ .spec = .{
-            .target = ur.Target.NATIVE,
-            .version = version,
-        }, .argshift = 0 };
-    }
-    // Check for latest remote version
-    var index = try ur.fetch_remote_index(io, allocator);
-    defer index.deinit();
-    if (index.defaultRemoteSpec()) |spec| return .{ .spec = spec, .argshift = 0 };
-    // Somehow there is nothing!
-    try tio.out.print("There does not seem to be a native version of zig for your architecture. You may try installing foreign architectures and running them with emulation.", .{});
-    return null;
-}
+        // Somehow there is nothing!
+        try g.tio.out.print("There does not seem to be a native version of zig for your architecture. You may try installing foreign architectures and running them with emulation.", .{});
+        return;
+    };
 
-fn install(io: std.Io, allocator: std.mem.Allocator, tio: ur.TioInterface, args: []const [:0]const u8, library: *ur.Library) !void {
-    const guess = try guessSpec(io, allocator, tio, args, .{}) orelse return;
-    const spec = guess.spec;
-    if (try library.isInstalled(spec)) {
-        try tio.err.print("Error: {f} is already installed.\n", .{spec});
+    if (try library.isInstalled(g, spec)) {
+        try g.tio.err.print("Error: {f} is already installed.\n", .{spec});
         return;
     }
-    try ensure_installed(io, allocator, tio, spec, library);
+    try ensure_installed(g, library, index, spec);
+}
+
+fn subcommand_uninstall(g: ur.Global, library: *ur.Library, args: []const [:0]const u8) !void {
+    const spec = spec_block: {
+        // Try to parse SPEC
+        if (args.len > 0) {
+            if (ur.Spec.parse(args[0], .{ .infer_product = .Zig, .infer_target = ur.Target.NATIVE }, .{ .infer_cpu = ur.Target.NATIVE.cpu, .infer_os = ur.Target.NATIVE.os })) |spec| {
+                if (try library.isInstalled(g, spec)) break :spec_block spec;
+            } else |_| {}
+            // Check if args[0] is a version or target of something installed
+            if (try library.match(g, args[0])) |spec| break :spec_block spec;
+            try g.tio.err.print("Error: could not parse '{s}'\n", .{args[0]});
+        }
+        try subcommand_help(g);
+        return;
+    };
+
+    var buffer = std.mem.zeroes([std.fs.max_name_bytes]u8);
+    try library.data_dir.deleteTree(g.init.io, try spec.buffered(&buffer));
+    try g.tio.out.print("Uninstalled {f} .\n", .{spec});
 }
 
 // TODO: use actual errors here to signify different return states
-fn ensure_installed(io: std.Io, allocator: std.mem.Allocator, tio: ur.TioInterface, spec: ur.Spec, library: *ur.Library) !void {
-    if (try library.isInstalled(spec)) return;
+fn ensure_installed(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex, spec: ur.Spec) !void {
+    if (try library.isInstalled(g, spec)) return;
 
-    var index = try ur.fetch_remote_index(io, allocator);
-    defer index.deinit();
     const remote_tarball = index.content.get(spec) orelse {
-        try tio.err.print("Error: zig version '{f}' does not exist or not support architecture '{f}'\n", .{ spec.version, spec.target });
+        try g.tio.err.print("Error: {f} version '{f}' does not exist or not support architecture '{f}'\n", .{ spec.product, spec.version, spec.target });
         return;
     };
-    try tio.out.print("Starting to install {f} .\n", .{spec});
-    try tio.out.flush();
+    try g.tio.out.print("Starting to install {f} .\n", .{spec});
+    try g.tio.out.flush();
 
-    try library.installRemoteTarball(allocator, spec, remote_tarball);
-    try tio.out.print("Finished installing {f} .\n", .{spec});
+    try library.installRemoteTarball(g, spec, remote_tarball);
+    try g.tio.out.print("Finished installing {f} .\n", .{spec});
 }
 
-fn shim(io: std.Io, allocator: std.mem.Allocator, tio: ur.TioInterface, parent_args: []const [:0]const u8, library: *ur.Library) !void {
-    const guess = try guessSpec(io, allocator, tio, parent_args, .{ .library = library, .shim_args0 = true }) orelse return;
-    const spec = guess.spec;
-    const args = parent_args[guess.argshift..];
+fn shim(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex, spec: ur.Spec, args: []const [:0]const u8) !void {
+    try ensure_installed(g, library, index, spec);
+    var spec_dir = try library.openSpecDir(g, spec, .{});
+    defer spec_dir.close(g.init.io);
 
-    try ensure_installed(io, allocator, tio, spec, library);
-    var zig_dir = try library.openZigDir(spec, .{});
-    defer zig_dir.close(io);
+    var spec_dir_path = std.mem.zeroes([std.fs.max_path_bytes]u8);
+    const spec_dir_path_len = try spec_dir.realPath(g.init.io, &spec_dir_path);
 
-    var zig_dir_path = std.mem.zeroes([std.fs.max_path_bytes]u8);
-    const zig_dir_path_len = try zig_dir.realPath(io, &zig_dir_path);
+    g.tio.out.flush() catch {};
+    g.tio.err.flush() catch {};
 
-    tio.out.flush() catch {};
-    tio.err.flush() catch {};
+    var buffer = std.mem.zeroes([std.fs.max_name_bytes]u8);
+    var writer = std.Io.Writer.fixed(&buffer);
+    try writer.print(if (builtin.os.tag == .windows) "{f}.exe" else "{f}", .{spec.product});
+    const exe_name = writer.buffered();
 
-    const zig_exe = try std.fs.path.join(allocator, &[_][]const u8{ zig_dir_path[0..zig_dir_path_len], if (builtin.os.tag == .windows) "zig.exe" else "zig" });
-    defer allocator.free(zig_exe);
+    const exe_path = try std.fs.path.join(g.init.gpa, &[_][]const u8{ spec_dir_path[0..spec_dir_path_len], exe_name });
+    defer g.init.gpa.free(exe_path);
 
     var argv: std.ArrayList([]const u8) = .empty;
-    defer argv.deinit(allocator);
-    try argv.append(allocator, zig_exe);
+    defer argv.deinit(g.init.gpa);
+    try argv.append(g.init.gpa, exe_path);
     for (args) |arg| {
-        try argv.append(allocator, arg);
+        try argv.append(g.init.gpa, arg);
+    }
+
+    // if zls, try to update path against actual zig
+    if (spec.product == .Zls) {
+        var spec_zig = spec;
+        spec_zig.product = .Zig;
+        if (library.openSpecDir(g, spec_zig, .{})) |zig_spec_dir| {
+            defer zig_spec_dir.close(g.init.io);
+            var zig_spec_path_buf = std.mem.zeroes([std.fs.max_path_bytes]u8);
+            const zig_spec_path_len = try zig_spec_dir.realPath(g.init.io, &zig_spec_path_buf);
+            const oldpath = g.init.environ_map.get("PATH") orelse "";
+            var newpath = try g.init.gpa.alloc(u8, oldpath.len + zig_spec_path_len + 1);
+            errdefer g.init.gpa.free(newpath);
+            std.mem.copyForwards(u8, newpath, zig_spec_path_buf[0..zig_spec_path_len]);
+            newpath[zig_spec_path_len] = ':';
+            std.mem.copyForwards(u8, newpath[zig_spec_path_len+1..], oldpath);
+            try g.tio.err.print("{s}\n", .{newpath});
+            try g.init.environ_map.put("PATH", newpath);
+        } else |_| {}
     }
 
     // Execv will prevent us from using GPA's memory leak detection, so we disable it on Debug
     if (std.process.can_replace and builtin.mode != .Debug) {
-        return std.process.replace(io, .{ .argv = argv.items });
+        return std.process.replace(g.init.io, .{ .argv = argv.items, .environ_map = g.init.environ_map });
     } else if (std.process.can_spawn) {
-        var child = try std.process.spawn(io, .{ .argv = argv.items });
-        const term = try child.wait(io);
+        var child = try std.process.spawn(g.init.io, .{ .argv = argv.items, .environ_map = g.init.environ_map });
+        const term = try child.wait(g.init.io);
         // Exit on release with the appropriate exit code
         if (builtin.mode != .Debug) std.process.exit(term.exited);
     } else {
         @compileError("Error: No shim mechanism available for this target.");
     }
-}
-
-fn uninstall(io: std.Io, tio: ur.TioInterface, args: []const [:0]const u8, library: *ur.Library) !void {
-    const spec = spec_block: {
-        // Try to parse SPEC
-        if (args.len > 0) {
-            if (ur.Spec.parse(args[0], .{ .infer_prefix = true, .infer_target = true }, .{ .infer_cpu = true, .infer_os = true })) |spec| {
-                if (try library.isInstalled(spec)) break :spec_block spec;
-            } else |_| {}
-            // Check if args[0] is a version or target of something installed
-            if (try library.match(args[0])) |spec| break :spec_block spec;
-            try tio.err.print("Error: could not parse '{s}'\n", .{args[0]});
-        }
-        try help(tio);
-        return;
-    };
-
-    var buffer = std.mem.zeroes([std.fs.max_name_bytes]u8);
-    try library.data_dir.deleteTree(io, try spec.buffered(&buffer));
-    try tio.out.print("Uninstalled {f} .\n", .{spec});
 }
 
 // TODO: Avoid rebuilding library and index too many times. Singletons?
