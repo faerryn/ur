@@ -3,22 +3,24 @@ const builtin = @import("builtin");
 const ur = @import("ur");
 const config = @import("config");
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
-    defer {
-        if (builtin.mode == .Debug) {
-            _ = gpa.detectLeaks();
-        }
-        _ = gpa.deinit();
-    }
-    const allocator = gpa.allocator();
-
-    var tio_context = ur.Tio(if (builtin.mode == .Debug) 0 else 4096, 0).init();
+pub fn main(init: std.process.Init) void {
+    var tio_context = ur.Tio(if (builtin.mode == .Debug) 0 else 4096, 0).init(init.io);
     defer tio_context.deinit();
     const tio = tio_context.interface();
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    app(init, tio) catch |err| {
+        tio.err.print("error: {}\n", .{ .err = err }) catch {};
+    };
+}
+
+fn app(init: std.process.Init, tio: ur.TioInterface) !void {
+    var arena = std.heap.ArenaAllocator.init(init.gpa);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+    const args = try init.minimal.args.toSlice(arena_allocator);
+
+    var library = try ur.Library.init(init.io, init.environ_map);
+    defer library.deinit();
 
     const Subcommand = enum { help, version, list, install, uninstall, zig };
     const subcommand: Subcommand, const argshift: usize = subcommand_block: {
@@ -36,10 +38,10 @@ pub fn main() !void {
     switch (subcommand) {
         .help => try help(tio),
         .version => try print_version(tio),
-        .list => try list(allocator, tio, args[argshift..]),
-        .install => try install(allocator, tio, args[argshift..]),
-        .uninstall => try uninstall(tio, args[argshift..]),
-        .zig => try shim(allocator, tio, args[argshift..]),
+        .list => try list(init.io, init.gpa, tio, args[argshift..], &library),
+        .install => try install(init.io, init.gpa, tio, args[argshift..], &library),
+        .uninstall => try uninstall(init.io, tio, args[argshift..], &library),
+        .zig => try shim(init.io, init.gpa, tio, args[argshift..], &library),
     }
 }
 
@@ -65,7 +67,7 @@ fn print_version(tio: ur.TioInterface) !void {
     try tio.out.print("{s} {s}\n", .{ config.name, config.version });
 }
 
-fn list(allocator: std.mem.Allocator, tio: ur.TioInterface, args: [][:0]u8) !void {
+fn list(io: std.Io, allocator: std.mem.Allocator, tio: ur.TioInterface, args: []const [:0]const u8, library: *ur.Library) !void {
     const subcommand = subcommand_block: {
         if (args.len > 0) {
             if (std.meta.stringToEnum(enum { available, all, installed }, args[0])) |subcommand| {
@@ -78,7 +80,7 @@ fn list(allocator: std.mem.Allocator, tio: ur.TioInterface, args: [][:0]u8) !voi
     };
     switch (subcommand) {
         .all, .available => {
-            var index = try ur.fetch_remote_index(allocator);
+            var index = try ur.fetch_remote_index(io, allocator);
             defer index.deinit();
             var it = index.content.iterator();
             while (it.next()) |kv| {
@@ -88,8 +90,6 @@ fn list(allocator: std.mem.Allocator, tio: ur.TioInterface, args: [][:0]u8) !voi
             try tio.out.flush();
         },
         .installed => {
-            var library = try ur.Library.init();
-            defer library.deinit();
             var it = library.iterate();
             while (try it.next()) |spec| {
                 try tio.out.print("{f}\n", .{spec});
@@ -99,7 +99,7 @@ fn list(allocator: std.mem.Allocator, tio: ur.TioInterface, args: [][:0]u8) !voi
 }
 
 const GuessSpecOptions = struct {
-    library: ?ur.Library = null, // match against library if non-null
+    library: ?*ur.Library = null, // match against library if non-null
     shim_args0: bool = false, // allow non-SPEC args[0]
 };
 const GuessSpecResults = struct {
@@ -107,9 +107,9 @@ const GuessSpecResults = struct {
     argshift: usize,
 };
 // guess the spec for install and shim
-fn guessSpec(allocator: std.mem.Allocator, tio: ur.TioInterface, args: [][:0]u8, opts: GuessSpecOptions) !?GuessSpecResults {
+fn guessSpec(io: std.Io, allocator: std.mem.Allocator, tio: ur.TioInterface, args: []const [:0]const u8, opts: GuessSpecOptions) !?GuessSpecResults {
     // TODO: somehow prepare a (not-slow) fallback default from the remote index
-    const build_version = try ur.findBuildVersion(allocator, std.fs.cwd());
+    const build_version = try ur.findBuildVersion(io, allocator, std.Io.Dir.cwd());
     // Check if SPEC is specified
     if (args.len > 0) {
         // TODO: Infer version somehow
@@ -139,7 +139,7 @@ fn guessSpec(allocator: std.mem.Allocator, tio: ur.TioInterface, args: [][:0]u8,
         }, .argshift = 0 };
     }
     // Check for latest remote version
-    var index = try ur.fetch_remote_index(allocator);
+    var index = try ur.fetch_remote_index(io, allocator);
     defer index.deinit();
     if (index.defaultRemoteSpec()) |spec| return .{ .spec = spec, .argshift = 0 };
     // Somehow there is nothing!
@@ -147,26 +147,21 @@ fn guessSpec(allocator: std.mem.Allocator, tio: ur.TioInterface, args: [][:0]u8,
     return null;
 }
 
-fn install(allocator: std.mem.Allocator, tio: ur.TioInterface, args: [][:0]u8) !void {
-    const guess = try guessSpec(allocator, tio, args, .{}) orelse return;
+fn install(io: std.Io, allocator: std.mem.Allocator, tio: ur.TioInterface, args: []const [:0]const u8, library: *ur.Library) !void {
+    const guess = try guessSpec(io, allocator, tio, args, .{}) orelse return;
     const spec = guess.spec;
-    var library = try ur.Library.init();
-    defer library.deinit();
     if (try library.isInstalled(spec)) {
         try tio.err.print("Error: {f} is already installed.\n", .{spec});
         return;
     }
-    try ensure_installed(allocator, tio, spec);
+    try ensure_installed(io, allocator, tio, spec, library);
 }
 
 // TODO: use actual errors here to signify different return states
-fn ensure_installed(allocator: std.mem.Allocator, tio: ur.TioInterface, spec: ur.Spec) !void {
-    var library = try ur.Library.init();
-    defer library.deinit();
-
+fn ensure_installed(io: std.Io, allocator: std.mem.Allocator, tio: ur.TioInterface, spec: ur.Spec, library: *ur.Library) !void {
     if (try library.isInstalled(spec)) return;
 
-    var index = try ur.fetch_remote_index(allocator);
+    var index = try ur.fetch_remote_index(io, allocator);
     defer index.deinit();
     const remote_tarball = index.content.get(spec) orelse {
         try tio.err.print("Error: zig version '{f}' does not exist or not support architecture '{f}'\n", .{ spec.version, spec.target });
@@ -179,22 +174,24 @@ fn ensure_installed(allocator: std.mem.Allocator, tio: ur.TioInterface, spec: ur
     try tio.out.print("Finished installing {f} .\n", .{spec});
 }
 
-fn shim(allocator: std.mem.Allocator, tio: ur.TioInterface, parent_args: [][:0]u8) !void {
-    var library = try ur.Library.init();
-    defer library.deinit();
-
-    const guess = try guessSpec(allocator, tio, parent_args, .{ .library = library, .shim_args0 = true }) orelse return;
+fn shim(io: std.Io, allocator: std.mem.Allocator, tio: ur.TioInterface, parent_args: []const [:0]const u8, library: *ur.Library) !void {
+    const guess = try guessSpec(io, allocator, tio, parent_args, .{ .library = library, .shim_args0 = true }) orelse return;
     const spec = guess.spec;
     const args = parent_args[guess.argshift..];
 
-    try ensure_installed(allocator, tio, spec);
+    try ensure_installed(io, allocator, tio, spec, library);
     var zig_dir = try library.openZigDir(spec, .{});
-    defer zig_dir.close();
+    defer zig_dir.close(io);
 
-    var buffer = std.mem.zeroes([std.fs.max_path_bytes]u8);
-    const zig_exe = try zig_dir.realpath(if (builtin.os.tag == .windows) "zig.exe" else "zig", &buffer);
+    var zig_dir_path = std.mem.zeroes([std.fs.max_path_bytes]u8);
+    const zig_dir_path_len = try zig_dir.realPath(io, &zig_dir_path);
 
-    var argv: std.ArrayList([]u8) = .empty;
+    // var buffer = std.mem.zeroes([std.fs.max_path_bytes]u8);
+
+    const zig_exe = try std.fs.path.join(allocator, &[_][]const u8{ zig_dir_path[0..zig_dir_path_len], if (builtin.os.tag == .windows) "zig.exe" else "zig" });
+    defer allocator.free(zig_exe);
+
+    var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(allocator);
     try argv.append(allocator, zig_exe);
     for (args) |arg| {
@@ -202,22 +199,19 @@ fn shim(allocator: std.mem.Allocator, tio: ur.TioInterface, parent_args: [][:0]u
     }
 
     // Execv will prevent us from using GPA's memory leak detection, so we disable it on Debug
-    if (std.process.can_execv and builtin.mode != .Debug) {
-        return std.process.execv(allocator, argv.items);
+    if (std.process.can_replace and builtin.mode != .Debug) {
+        return std.process.replace(io, .{ .argv = argv.items });
     } else if (std.process.can_spawn) {
-        var child = std.process.Child.init(argv.items, allocator);
-        const term = try child.spawnAndWait();
+        var child = try std.process.spawn(io, .{ .argv = argv.items });
+        const term = try child.wait(io);
         // Exit on release with the appropriate exit code
-        if (builtin.mode != .Debug) std.process.exit(term.Exited);
+        if (builtin.mode != .Debug) std.process.exit(term.exited);
     } else {
         @compileError("Error: No shim mechanism available for this target.");
     }
 }
 
-fn uninstall(tio: ur.TioInterface, args: [][:0]u8) !void {
-    var library = try ur.Library.init();
-    defer library.deinit();
-
+fn uninstall(io: std.Io, tio: ur.TioInterface, args: []const [:0]const u8, library: *ur.Library) !void {
     const spec = spec_block: {
         // Try to parse SPEC
         if (args.len > 0) {
@@ -233,7 +227,7 @@ fn uninstall(tio: ur.TioInterface, args: [][:0]u8) !void {
     };
 
     var buffer = std.mem.zeroes([std.fs.max_name_bytes]u8);
-    try library.data_dir.deleteTree(try spec.buffered(&buffer));
+    try library.data_dir.deleteTree(io, try spec.buffered(&buffer));
     try tio.out.print("Uninstalled {f} .\n", .{spec});
 }
 

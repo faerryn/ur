@@ -155,7 +155,7 @@ pub const RemoteTarball = struct {
     size: usize,
 };
 
-pub const RemoteIndexContent = std.AutoArrayHashMap(Spec, RemoteTarball);
+pub const RemoteIndexContent = std.AutoHashMap(Spec, RemoteTarball);
 
 pub const RemoteIndex = struct {
     arena: std.heap.ArenaAllocator,
@@ -168,14 +168,15 @@ pub const RemoteIndex = struct {
     // Returns null if content is empty (should be unlikely)
     pub fn defaultRemoteSpec(self: @This()) ?Spec {
         var candidate: ?Spec = null;
-        for (self.content.keys()) |spec| {
+        var key_iterator = self.content.keyIterator();
+        while (key_iterator.next()) |spec| {
             if (spec.target.isNative()) {
                 if (candidate) |other| {
                     if (spec.version.gt(other.version)) {
-                        candidate = spec;
+                        candidate = spec.*;
                     }
                 } else {
-                    candidate = spec;
+                    candidate = spec.*;
                 }
             }
         }
@@ -183,14 +184,14 @@ pub const RemoteIndex = struct {
     }
 };
 
-pub fn fetch_remote_index(backing_allocator: std.mem.Allocator) !RemoteIndex {
+pub fn fetch_remote_index(io: std.Io, backing_allocator: std.mem.Allocator) !RemoteIndex {
     var arena = std.heap.ArenaAllocator.init(backing_allocator);
     errdefer arena.deinit();
     const allocator = arena.allocator();
 
     var content = RemoteIndexContent.init(allocator);
 
-    const s = try http_get(allocator, "https://ziglang.org/download/index.json");
+    const s = try http_get(io, allocator, "https://ziglang.org/download/index.json");
 
     const index_value = try std.json.parseFromSliceLeaky(std.json.Value, allocator, s, .{});
 
@@ -223,7 +224,7 @@ pub fn fetch_remote_index(backing_allocator: std.mem.Allocator) !RemoteIndex {
     return .{ .content = content, .arena = arena };
 }
 
-pub fn http_get(allocator: std.mem.Allocator, url_undecorated: []const u8) ![]u8 {
+pub fn http_get(io: std.Io, allocator: std.mem.Allocator, url_undecorated: []const u8) ![]u8 {
     var url: std.ArrayList(u8) = .empty;
     defer url.deinit(allocator);
     if (std.mem.indexOfScalar(u8, url_undecorated, '?') == null) {
@@ -231,8 +232,8 @@ pub fn http_get(allocator: std.mem.Allocator, url_undecorated: []const u8) ![]u8
     } else {
         try url.print(allocator, "{s},source=ur", .{url_undecorated});
     }
-    var client = std.http.Client{ .allocator = allocator };
-    var writer = std.io.Writer.Allocating.init(allocator);
+    var client = std.http.Client{ .io = io, .allocator = allocator };
+    var writer = std.Io.Writer.Allocating.init(allocator);
     const result = try client.fetch(.{
         .response_writer = &writer.writer,
         .location = .{ .url = url.items },
@@ -244,9 +245,9 @@ pub fn http_get(allocator: std.mem.Allocator, url_undecorated: []const u8) ![]u8
     return try writer.toOwnedSlice();
 }
 
-fn getAppPath(allocator: std.mem.Allocator, known_folder: known_folders.KnownFolder) ![]const u8 {
+fn getAppPath(io: std.Io, allocator: std.mem.Allocator, environ: *std.process.Environ.Map, known_folder: known_folders.KnownFolder) ![]const u8 {
     const parent_path =
-        try known_folders.getPath(std.Io{}, allocator, known_folder) orelse return error.NotFound;
+        try known_folders.getPath(io, allocator, environ, known_folder) orelse return error.NotFound;
     defer allocator.free(parent_path);
     const sub_path = switch (builtin.os.tag) {
         .macos => "com.faerryn." ++ config.name,
@@ -255,31 +256,33 @@ fn getAppPath(allocator: std.mem.Allocator, known_folder: known_folders.KnownFol
     const path_parts = &[_][]const u8{ parent_path, sub_path };
     return try std.fs.path.join(allocator, path_parts);
 }
-fn openAppDir(allocator: std.mem.Allocator, known_folder: known_folders.KnownFolder, args: std.fs.Dir.OpenOptions) !std.fs.Dir {
-    const path = try getAppPath(allocator, known_folder);
+fn openAppDir(io: std.Io, allocator: std.mem.Allocator, environ: *std.process.Environ.Map, known_folder: known_folders.KnownFolder, args: std.Io.Dir.OpenOptions) !std.Io.Dir {
+    const path = try getAppPath(io, allocator, environ, known_folder);
     defer allocator.free(path);
-    std.fs.cwd().makePath(path) catch |err| {
+    std.Io.Dir.cwd().createDirPath(io, path) catch |err| {
         if (err != error.PathAlreadyExists) return err;
     };
-    return try std.fs.cwd().openDir(path, args);
+    return try std.Io.Dir.cwd().openDir(io, path, args);
 }
 
 pub fn Tio(comptime out_buf_size: usize, comptime err_buf_size: usize) type {
     return struct {
-        out_file: std.fs.File,
-        out_buf: [out_buf_size]u8 = std.mem.zeroes([out_buf_size]u8),
-        out: std.fs.File.Writer = undefined,
-
-        err_file: std.fs.File,
-        err_buf: [err_buf_size]u8 = std.mem.zeroes([err_buf_size]u8),
-        err: std.fs.File.Writer = undefined,
-
         initialized: bool = false,
+        io: std.Io,
 
-        pub fn init() @This() {
+        out_file: std.Io.File,
+        out_buf: [out_buf_size]u8 = std.mem.zeroes([out_buf_size]u8),
+        out: std.Io.File.Writer = undefined,
+
+        err_file: std.Io.File,
+        err_buf: [err_buf_size]u8 = std.mem.zeroes([err_buf_size]u8),
+        err: std.Io.File.Writer = undefined,
+
+        pub fn init(io: std.Io) @This() {
             return .{
-                .out_file = std.fs.File.stdout(),
-                .err_file = std.fs.File.stderr(),
+                .io = io,
+                .out_file = std.Io.File.stdout(),
+                .err_file = std.Io.File.stderr(),
             };
         }
 
@@ -288,15 +291,15 @@ pub fn Tio(comptime out_buf_size: usize, comptime err_buf_size: usize) type {
                 self.out.interface.flush() catch {};
                 self.err.interface.flush() catch {};
             }
-            self.out_file.close();
-            self.err_file.close();
+            self.out_file.close(self.io);
+            self.err_file.close(self.io);
         }
 
         pub fn interface(self: *@This()) TioInterface {
             if (!self.initialized) {
                 self.initialized = true;
-                self.out = self.out_file.writer(&self.out_buf);
-                self.err = self.err_file.writer(&self.err_buf);
+                self.out = self.out_file.writer(self.io, &self.out_buf);
+                self.err = self.err_file.writer(self.io, &self.err_buf);
             }
             return .{
                 .out = &self.out.interface,
@@ -307,21 +310,21 @@ pub fn Tio(comptime out_buf_size: usize, comptime err_buf_size: usize) type {
 }
 
 pub const TioInterface = struct {
-    out: *std.io.Writer,
-    err: *std.io.Writer,
+    out: *std.Io.Writer,
+    err: *std.Io.Writer,
 };
 
-pub fn findBuildVersion(allocator: std.mem.Allocator, dir: std.fs.Dir) !?Version {
-    if (dir.openFile("build.zig.zon", .{})) |file| {
-        defer file.close();
-        const stat = try file.stat();
+pub fn findBuildVersion(io: std.Io, allocator: std.mem.Allocator, dir: std.Io.Dir) !?Version {
+    if (dir.openFile(io, "build.zig.zon", .{})) |file| {
+        defer file.close(io);
+        const stat = try file.stat(io);
         var buffer = std.mem.zeroes([4096]u8);
-        var reader = file.reader(&buffer);
+        var reader = file.reader(io, &buffer);
         var source = try allocator.alloc(u8, stat.size + 1);
         defer allocator.free(source);
         @memset(source, 0);
         try reader.interface.readSliceAll(source[0..stat.size]);
-        if (std.zon.parse.fromSlice(struct { minimum_zig_version: []const u8 }, allocator, source[0..stat.size :0], null, .{ .ignore_unknown_fields = true })) |zon| {
+        if (std.zon.parse.fromSliceAlloc(struct { minimum_zig_version: []const u8 }, allocator, source[0..stat.size :0], null, .{ .ignore_unknown_fields = true })) |zon| {
             defer allocator.free(zon.minimum_zig_version);
             if (Version.parse(zon.minimum_zig_version)) |version| {
                 return version;
@@ -337,42 +340,45 @@ pub fn findBuildVersion(allocator: std.mem.Allocator, dir: std.fs.Dir) !?Version
         }
     }
 
-    var parent = try dir.openDir("..", .{});
-    defer parent.close();
-    var buffer1 = std.mem.zeroes([std.fs.max_path_bytes]u8);
-    var buffer2 = std.mem.zeroes([std.fs.max_path_bytes]u8);
-    const dir_path = try dir.realpath(".", &buffer1);
-    const parent_path = try parent.realpath(".", &buffer2);
-    if (std.mem.eql(u8, dir_path, parent_path)) {
+    var parent = try dir.openDir(io, "..", .{});
+    defer parent.close(io);
+    var dir_buf = std.mem.zeroes([std.fs.max_path_bytes]u8);
+    var parent_buf = std.mem.zeroes([std.fs.max_path_bytes]u8);
+    const dir_len = try dir.realPath(io, &dir_buf);
+    const parent_len = try parent.realPath(io, &parent_buf);
+    if (std.mem.eql(u8, dir_buf[0..dir_len], parent_buf[0..parent_len])) {
         return null;
     }
-    return try findBuildVersion(allocator, parent);
+    return try findBuildVersion(io, allocator, parent);
 }
 
 // Library of local zig installations
 pub const Library = struct {
-    data_dir: std.fs.Dir,
-    cache_dir: std.fs.Dir,
+    io: std.Io,
+    data_dir: std.Io.Dir,
+    cache_dir: std.Io.Dir,
 
-    pub fn init() !@This() {
+    pub fn init(io: std.Io, environ: *std.process.Environ.Map) !@This() {
         var buffer = std.mem.zeroes([std.fs.max_path_bytes]u8);
         var fba = std.heap.FixedBufferAllocator.init(&buffer);
         const allocator = fba.allocator();
         return .{
-            .data_dir = try openAppDir(allocator, .data, .{ .iterate = true }),
-            .cache_dir = try openAppDir(allocator, .cache, .{ .iterate = true }),
+            .io = io,
+            .data_dir = try openAppDir(io, allocator, environ, .data, .{ .iterate = true }),
+            .cache_dir = try openAppDir(io, allocator, environ, .cache, .{ .iterate = true }),
         };
     }
 
     pub fn deinit(self: *@This()) void {
-        self.data_dir.close();
-        self.cache_dir.close();
+        self.data_dir.close(self.io);
+        self.cache_dir.close(self.io);
     }
 
     pub const Iterator = struct {
-        it: std.fs.Dir.Iterator,
+        io: std.Io,
+        it: std.Io.Dir.Iterator,
         pub fn next(self: *@This()) !?Spec {
-            while (try self.it.next()) |entry| {
+            while (try self.it.next(self.io)) |entry| {
                 if (entry.kind != .directory) continue;
                 const spec = Spec.parse(entry.name, .{}, .{}) catch continue;
                 return spec;
@@ -382,17 +388,17 @@ pub const Library = struct {
     };
 
     pub fn iterate(self: @This()) Iterator {
-        return .{ .it = self.data_dir.iterate() };
+        return .{ .io = self.io, .it = self.data_dir.iterate() };
     }
 
-    pub fn openZigDir(self: @This(), spec: Spec, args: std.fs.Dir.OpenOptions) !std.fs.Dir {
+    pub fn openZigDir(self: @This(), spec: Spec, args: std.Io.Dir.OpenOptions) !std.Io.Dir {
         var buffer = std.mem.zeroes([std.fs.max_name_bytes]u8);
-        return try self.data_dir.openDir(try spec.buffered(&buffer), args);
+        return try self.data_dir.openDir(self.io, try spec.buffered(&buffer), args);
     }
 
     pub fn isInstalled(self: @This(), spec: Spec) !bool {
         var buffer = std.mem.zeroes([std.fs.max_name_bytes]u8);
-        if (self.data_dir.access(try spec.buffered(&buffer), .{})) {
+        if (self.data_dir.access(self.io, try spec.buffered(&buffer), .{})) {
             return true;
         } else |err| {
             if (err == error.FileNotFound) return false;
@@ -406,7 +412,7 @@ pub const Library = struct {
         try zig_dir_name_writer.print("{f}", .{spec});
         const zig_dir_name = zig_dir_name_writer.buffered();
         // Exit if already installed
-        if (self.data_dir.access(zig_dir_name, .{})) {
+        if (self.data_dir.access(self.io, zig_dir_name, .{})) {
             return error.AlreadyInstalled;
         } else |err| {
             if (err != error.FileNotFound) return err;
@@ -426,68 +432,52 @@ pub const Library = struct {
         }
         const filename = zig_dir_name_writer.buffered();
         var download = true;
-        var file: std.fs.File = self.cache_dir.createFile(filename, .{ .read = true, .exclusive = true }) catch |err| file_block: {
+        var file: std.Io.File = self.cache_dir.createFile(self.io, filename, .{ .read = true, .exclusive = true }) catch |err| file_block: {
             if (err != error.PathAlreadyExists) return err;
             download = false;
-            break :file_block try self.cache_dir.openFile(filename, .{});
+            break :file_block try self.cache_dir.openFile(self.io, filename, .{});
         };
-        defer file.close();
+        defer file.close(self.io);
         var buffer = std.mem.zeroes([4096]u8);
         if (download) {
-            errdefer self.cache_dir.deleteFile(filename) catch {};
-            var writer = file.writer(&buffer);
-            const compressed_bytes = try http_get(allocator, remote_tarball.tarball);
+            errdefer self.cache_dir.deleteFile(self.io, filename) catch {};
+            var writer = file.writer(self.io, &buffer);
+            const compressed_bytes = try http_get(self.io, allocator, remote_tarball.tarball);
             defer allocator.free(compressed_bytes);
             try writer.interface.writeAll(compressed_bytes);
             try writer.interface.flush();
         }
 
-        try self.data_dir.makePath(zig_dir_name);
-        errdefer self.data_dir.deleteTree(zig_dir_name) catch {};
-        var zig_dir = try self.data_dir.openDir(zig_dir_name, .{ .iterate = true });
-        defer zig_dir.close();
+        try self.data_dir.createDirPath(self.io, zig_dir_name);
+        errdefer self.data_dir.deleteTree(self.io, zig_dir_name) catch {};
+
+        var zig_dir = try self.data_dir.openDir(self.io, zig_dir_name, .{ .iterate = true });
+        defer zig_dir.close(self.io);
+        var file_reader = file.reader(self.io, &buffer);
         switch (filetype) {
             .zip => {
-                var file_reader = file.reader(&buffer);
                 try std.zip.extract(zig_dir, &file_reader, .{});
+                var it = zig_dir.iterate();
+                const mono_entry = try it.next(self.io) orelse return error.EmptyZip;
+                defer zig_dir.deleteTree(self.io, mono_entry.name) catch {};
+                var mono_dir = try zig_dir.openDir(self.io, mono_entry.name, .{ .iterate = true });
+                defer mono_dir.close(self.io);
+                it = mono_dir.iterate();
+                while (try it.next(self.io)) |entry| {
+                    try mono_dir.rename(entry.name, zig_dir, entry.name, self.io);
+                }
             },
             .tar_xz => {
-                const file_reader = file.deprecatedReader();
-                var decompress = try std.compress.xz.decompress(allocator, file_reader);
+                const buffer2 = try allocator.alloc(u8, 4096);
+                var decompress = try std.compress.xz.Decompress.init(&file_reader.interface, allocator, buffer2);
                 defer decompress.deinit();
-                const decompress_reader = decompress.reader();
-                var decompress_adapter = decompress_reader.adaptToNewApi(&buffer);
-                try std.tar.pipeToFileSystem(zig_dir, &decompress_adapter.new_interface, .{});
+                try std.tar.pipeToFileSystem(self.io, zig_dir, &decompress.reader, .{ .strip_components = 1 });
             },
-        }
-        var dir_it = zig_dir.iterate();
-        var entries: std.ArrayList(std.fs.Dir.Entry) = .empty;
-        defer entries.deinit(allocator);
-        while (try dir_it.next()) |entry| {
-            try entries.append(allocator, entry);
-        }
-        if (entries.items.len == 1 and
-            entries.items[0].kind == .directory)
-        {
-            var single_dir = try zig_dir.openDir(entries.items[0].name, .{ .iterate = true });
-            defer single_dir.close();
-            dir_it = single_dir.iterate();
-
-            var buffer1 = std.mem.zeroes([std.fs.max_path_bytes]u8);
-            var buffer2 = std.mem.zeroes([std.fs.max_path_bytes]u8);
-
-            const zig_path = try zig_dir.realpath(".", &buffer1);
-            while (try dir_it.next()) |entry| {
-                const old = try single_dir.realpath(entry.name, &buffer2);
-                const new = try std.fs.path.join(allocator, &[_][]const u8{ zig_path, entry.name });
-                defer allocator.free(new);
-                try std.fs.renameAbsolute(old, new);
-            }
         }
     }
 
     // TODO: consider returning errors instead of an option?
-    pub fn match(self: @This(), text: []u8) !?Spec {
+    pub fn match(self: @This(), text: []const u8) !?Spec {
         const try_target = Target.parse(text, .{ .infer_cpu = true, .infer_os = true }) catch null;
         const try_version = Version.parse(text) catch null;
         if (try_target == null and try_version == null) return null;
