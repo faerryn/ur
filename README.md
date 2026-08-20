@@ -1,19 +1,32 @@
 # Ur
-A Zig version manager, written in Zig.
+A Zig / ZLS version manager, written in Zig.
 
 ```
-A zig version manager, written in zig.
+A zig/zls version manager, written in zig.
 
 Usage: ur [COMMAND] [<ARGS>]
-Usage: zig (SPEC)? [<ARGS>]
+Usage: zig [<ARGS>]
 
 Commands:
   help                    Display this help message.
   install (SPEC)?         Install SPEC.
   uninstall [SPEC]        Uninstall SPEC
   list (all|installed)?   List versions for your architecture, or all versions, or just the ones installed.
-  zig (SPEC)? [<ARGS>]    Run SPEC with [<ARGS>].
+  (SPEC)? [<ARGS>]        Run program specified by SPEC, passing [<ARGS>].
   version                 Print the version of ur.
+
+Specs:
+  (zig|zls)?(-ARCH)?(-OS)?(-VERSION)?
+```
+
+# Example
+
+```bash
+# zig, zls are both symlinked to ur
+$ ls
+build.zig build.zig.zon src/
+$ zig build # ur will check build.zig.zon and match the version specified there
+$ "$EDITOR" src/main.zig # some other code editor using zls
 ```
 
 ## Installation
@@ -29,13 +42,14 @@ zig build --prefix "$HOME/.local" --release=fast
 
 ## Drop-in replacement
 Instead of typing `ur zig` or using an alias (which is undetectable by some build tools),
-you can install a symlink or shell script shim. You can still specify a version with `zig SPEC ...`.
+you can install a symlink or shell script shim. Ur will detect its own `argv[0]` being
+a valid SPEC and download and shim to the appropriate tool.
 
 ```bash
 ln -s ur "$HOME/.local/bin/zig"
 ```
 
-## Ziggurat
+## Ziggurat of Ur
 
 A ziggurat, probably not written in Zig.
 
