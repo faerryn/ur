@@ -1,0 +1,14 @@
+# TODO
+- [ ] Sort the output of list
+- [ ] Handle offline situation
+- [ ] Treat Zig and ZLS versions as semantically separate
+  - [ ] Rework the 'infer' and 'default-ing' mechanisms to be robust
+  - [ ] Merge ur.Library and ur.RemoteIndex
+- [ ] Flatten ur.Global
+- [ ] Better documentation
+  - [ ] Subcommand help
+  - [ ] Completion files
+    - [ ] Bash
+    - [ ] Zsh
+    - [ ] Fish
+  - [ ] Man page
