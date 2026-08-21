@@ -323,9 +323,9 @@ pub fn http_get(g: Global, allocator: std.mem.Allocator, url_undecorated: []cons
     var url: std.ArrayList(u8) = .empty;
     defer url.deinit(allocator);
     if (std.mem.indexOfScalar(u8, url_undecorated, '?') == null) {
-        try url.print(allocator, "{s}?source=ur", .{url_undecorated});
+        try url.print(allocator, "{s}?source=" ++ config.name, .{url_undecorated});
     } else {
-        try url.print(allocator, "{s},source=ur", .{url_undecorated});
+        try url.print(allocator, "{s},source=" ++ config.name, .{url_undecorated});
     }
     var client = std.http.Client{ .io = g.init.io, .allocator = allocator };
     var writer = std.Io.Writer.Allocating.init(allocator);
