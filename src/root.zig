@@ -299,6 +299,24 @@ pub const RemoteIndex = struct {
             }
         }
     }
+
+    // Finds latest runnable spec
+    pub fn latest_native(self: @This()) ?Spec {
+        var candidate: ?Spec = null;
+        var it = self.content.iterator();
+        while (it.next()) |entry| {
+            const spec = entry.key_ptr;
+            if (!spec.target.isNative()) continue;
+            if (candidate) |other| {
+                if (spec.version.gt(other.version)) {
+                    candidate = spec.*;
+                }
+            } else {
+                candidate = spec.*;
+            }
+        }
+        return candidate;
+    }
 };
 
 pub fn http_get(g: Global, allocator: std.mem.Allocator, url_undecorated: []const u8) ![]u8 {
@@ -371,7 +389,7 @@ pub const Library = struct {
         }
     };
 
-    pub fn iterate(self: @This()) Iterator {
+    pub fn iterator(self: @This()) Iterator {
         return .{ .it = self.data_dir.iterate() };
     }
 
@@ -470,7 +488,7 @@ pub const Library = struct {
     // Matches text against all installed specs to find a match. Returns null for multiple matches.
     pub fn match(self: @This(), g: Global, text: []const u8) !?Spec {
         var candidate: ?Spec = null;
-        var it = self.iterate();
+        var it = self.iterator();
         while (try it.next(g)) |spec| {
             if (Spec.parse(text, .{ .infer_target = spec.target, .infer_product = spec.product, .infer_version = spec.version }, .{ .infer_os = spec.target.os, .infer_cpu = spec.target.cpu })) |guess| {
                 if (std.meta.eql(spec, guess)) {
@@ -483,9 +501,9 @@ pub const Library = struct {
     }
 
     // Finds latest runnable spec
-    pub fn latest(self: @This(), g: Global) !?Spec {
+    pub fn latest_native(self: @This(), g: Global) !?Spec {
         var candidate: ?Spec = null;
-        var it = self.iterate();
+        var it = self.iterator();
         while (try it.next(g)) |spec| {
             if (!spec.target.isNative()) continue;
             if (candidate) |other| {

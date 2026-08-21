@@ -32,7 +32,7 @@ fn start(g: ur.Global) !void {
         } else |err| {
             if (err != error.FileNotFound) return err;
         }
-        if (try library.latest(g)) |spec| {
+        if (try library.latest_native(g)) |spec| {
             break :blk spec.version;
         }
         break :blk null;
@@ -62,7 +62,7 @@ fn start(g: ur.Global) !void {
         .help => try subcommand_help(g),
         .version => try subcommand_version(g),
         .list => try subcommand_list(g, &library, &index, args[argshift..]),
-        .install => try subcommand_install(g, &library, &index, default_version, args[argshift..]),
+        .install => try subcommand_install(g, &library, &index, args[argshift..]),
         .uninstall => try subcommand_uninstall(g, &library, args[argshift..]),
     }
 }
@@ -115,7 +115,7 @@ fn subcommand_list(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex, a
             try g.tio.out.flush();
         },
         .installed => {
-            var it = library.iterate();
+            var it = library.iterator();
             while (try it.next(g)) |spec| {
                 try g.tio.out.print("{f}\n", .{spec});
             }
@@ -123,7 +123,10 @@ fn subcommand_list(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex, a
     }
 }
 
-fn subcommand_install(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex, default_version: ?ur.Version, args: []const [:0]const u8) !void {
+fn subcommand_install(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex, args: []const [:0]const u8) !void {
+    try index.fetch_all(g);
+    const default_version = if (index.latest_native()) |spec| spec.version else null;
+    // const default_version = index.lastest
     const spec = blk: {
         // Check if SPEC is specified
         if (args.len > 1) {
@@ -147,7 +150,7 @@ fn subcommand_install(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex
             };
         }
         // Somehow there is nothing!
-        try g.tio.out.print("There does not seem to be a native version of zig for your architecture. You may try installing foreign architectures and running them with emulation.", .{});
+        try g.tio.out.print("There does not seem to be a native version of zig for your architecture. You may try installing foreign architectures and running them with emulation.\n", .{});
         return;
     };
 
