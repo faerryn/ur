@@ -26,7 +26,7 @@ fn start(g: ur.Global) !void {
     try index.request_remote_index(g, .Zls, "https://builds.zigtools.org/index.json");
     defer index.deinit(g);
 
-    const default_version =  blk: {
+    const default_version = blk: {
         if (ur.findBuildVersion(g, std.Io.Dir.cwd())) |v| {
             break :blk v;
         } else |err| {
@@ -135,7 +135,7 @@ fn subcommand_install(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex
             )) |spec| {
                 break :blk spec;
             } else |_| {}
-            try g.tio.err.print("Error: could not parse '{s}'\n", .{args[0]});
+            try g.tio.err.print("Error: could not parse '{s}'\n", .{args[1]});
             return;
         }
         if (default_version) |version| {
@@ -161,13 +161,13 @@ fn subcommand_install(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex
 fn subcommand_uninstall(g: ur.Global, library: *ur.Library, args: []const [:0]const u8) !void {
     const spec = spec_block: {
         // Try to parse SPEC
-        if (args.len > 0) {
-            if (ur.Spec.parse(args[0], .{ .infer_product = .Zig, .infer_target = ur.Target.NATIVE }, .{ .infer_cpu = ur.Target.NATIVE.cpu, .infer_os = ur.Target.NATIVE.os })) |spec| {
+        if (args.len > 1) {
+            if (ur.Spec.parse(args[1], .{ .infer_product = .Zig, .infer_target = ur.Target.NATIVE }, .{ .infer_cpu = ur.Target.NATIVE.cpu, .infer_os = ur.Target.NATIVE.os })) |spec| {
                 if (try library.isInstalled(g, spec)) break :spec_block spec;
             } else |_| {}
-            // Check if args[0] is a version or target of something installed
-            if (try library.match(g, args[0])) |spec| break :spec_block spec;
-            try g.tio.err.print("Error: could not parse '{s}'\n", .{args[0]});
+            // Check if args[1] is a version or target of something installed
+            if (try library.match(g, args[1])) |spec| break :spec_block spec;
+            try g.tio.err.print("Error: could not parse '{s}'\n", .{args[1]});
         }
         try subcommand_help(g);
         return;
@@ -233,7 +233,7 @@ fn shim(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex, spec: ur.Spe
             errdefer g.init.gpa.free(newpath);
             std.mem.copyForwards(u8, newpath, zig_spec_path_buf[0..zig_spec_path_len]);
             newpath[zig_spec_path_len] = ':';
-            std.mem.copyForwards(u8, newpath[zig_spec_path_len+1..], oldpath);
+            std.mem.copyForwards(u8, newpath[zig_spec_path_len + 1 ..], oldpath);
             try g.init.environ_map.put("PATH", newpath);
         } else |_| {}
     }

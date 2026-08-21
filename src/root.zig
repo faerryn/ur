@@ -244,7 +244,7 @@ pub const RemoteIndex = struct {
     }
 
     pub fn request_remote_index(self: *@This(), g: Global, product: Product, url: []const u8) !void {
-        try self.work_queue.append(g.init.gpa, .{.product =product, .url=url});
+        try self.work_queue.append(g.init.gpa, .{ .product = product, .url = url });
     }
 
     pub fn fetch_all(self: *@This(), g: Global) !void {
@@ -472,8 +472,7 @@ pub const Library = struct {
         var candidate: ?Spec = null;
         var it = self.iterate();
         while (try it.next(g)) |spec| {
-            if (Spec.parse(text, .{.infer_target=spec.target, .infer_product=spec.product, .infer_version=spec.version},
-                .{.infer_os = spec.target.os, .infer_cpu = spec.target.cpu})) |guess| {
+            if (Spec.parse(text, .{ .infer_target = spec.target, .infer_product = spec.product, .infer_version = spec.version }, .{ .infer_os = spec.target.os, .infer_cpu = spec.target.cpu })) |guess| {
                 if (std.meta.eql(spec, guess)) {
                     if (candidate) |_| return null; // too many candidates
                     candidate = guess;
@@ -558,14 +557,14 @@ pub const TioInterface = struct {
 pub fn findBuildVersion(g: Global, dir: std.Io.Dir) !?Version {
     if (dir.openFile(g.init.io, "build.zig.zon", .{})) |file| {
         defer file.close(g.init.io);
-        const stat = try file.stat(g.init.io);
         var buffer = std.mem.zeroes([4096]u8);
         var reader = file.reader(g.init.io, &buffer);
-        var source = try g.init.gpa.alloc(u8, stat.size + 1);
+        var writer = std.Io.Writer.Allocating.init(g.init.gpa);
+        defer writer.deinit();
+        _ = try reader.interface.streamRemaining(&writer.writer);
+        const source = try writer.toOwnedSliceSentinel(0);
         defer g.init.gpa.free(source);
-        @memset(source, 0);
-        try reader.interface.readSliceAll(source[0..stat.size]);
-        if (std.zon.parse.fromSliceAlloc(struct { minimum_zig_version: []const u8 }, g.init.gpa, source[0..stat.size :0], null, .{ .ignore_unknown_fields = true })) |zon| {
+        if (std.zon.parse.fromSliceAlloc(struct { minimum_zig_version: []const u8 }, g.init.gpa, source, null, .{ .ignore_unknown_fields = true })) |zon| {
             defer g.init.gpa.free(zon.minimum_zig_version);
             if (Version.parse(zon.minimum_zig_version)) |version| {
                 return version;
