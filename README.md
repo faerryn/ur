@@ -2,7 +2,7 @@
 A Zig / ZLS version manager, written in Zig.
 
 ```
-A zig/zls version manager, written in zig.
+A Zig/ZLS version manager, written in zig.
 
 Usage: ur [COMMAND] [<ARGS>]
 Usage: zig [<ARGS>]
@@ -27,7 +27,7 @@ Specs:
 $ ls
 build.zig build.zig.zon src/
 $ zig build # ur will check build.zig.zon and match the version specified there
-$ "$EDITOR" src/main.zig # some other code editor using zls
+$ "$EDITOR" src/main.zig # ZLS version will match Zig version!
 ```
 
 ## Installation
