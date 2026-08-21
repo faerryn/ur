@@ -234,7 +234,6 @@ fn shim(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex, spec: ur.Spe
             std.mem.copyForwards(u8, newpath, zig_spec_path_buf[0..zig_spec_path_len]);
             newpath[zig_spec_path_len] = ':';
             std.mem.copyForwards(u8, newpath[zig_spec_path_len+1..], oldpath);
-            try g.tio.err.print("{s}\n", .{newpath});
             try g.init.environ_map.put("PATH", newpath);
         } else |_| {}
     }
