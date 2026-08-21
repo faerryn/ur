@@ -408,6 +408,7 @@ pub const Library = struct {
         }
     }
 
+    // TODO: monster of a function, split it up and give things better names?
     pub fn installRemoteTarball(self: @This(), g: Global, spec: Spec, remote_tarball: RemoteTarball) !void {
         var zig_dir_name_buffer = std.mem.zeroes([std.fs.max_path_bytes]u8);
         var zig_dir_name_writer = std.Io.Writer.fixed(&zig_dir_name_buffer);
@@ -609,7 +610,3 @@ pub fn findBuildVersion(g: Global, dir: std.Io.Dir) !?Version {
     }
     return try findBuildVersion(g, parent);
 }
-
-// TODO: Use mirrors from "https://ziglang.org/download/community-mirrors.txt"
-// TODO: Verify tarballs with checksum and minisign
-// TODO: Cache index.json and community-mirrors.txt

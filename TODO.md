@@ -12,3 +12,8 @@
     - [ ] Zsh
     - [ ] Fish
   - [ ] Man page
+- [ ] Use mirrors from "https://ziglang.org/download/community-mirrors.txt"
+- [ ] Verify indices and tarballs
+  - [ ] Size comparison
+  - [ ] shasum checksum
+  - [ ] minisign

@@ -234,6 +234,7 @@ fn shim(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex, spec: ur.Spe
             const oldpath = g.init.environ_map.get("PATH") orelse "";
             var newpath = try g.init.gpa.alloc(u8, oldpath.len + zig_spec_path_len + 1);
             errdefer g.init.gpa.free(newpath);
+            // TODO: maybe use sprintf?
             std.mem.copyForwards(u8, newpath, zig_spec_path_buf[0..zig_spec_path_len]);
             newpath[zig_spec_path_len] = ':';
             std.mem.copyForwards(u8, newpath[zig_spec_path_len + 1 ..], oldpath);
