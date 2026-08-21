@@ -27,8 +27,10 @@ fn start(g: ur.Global) !void {
     defer index.deinit(g);
 
     const default_version =  blk: {
-        if (try ur.findBuildVersion(g, std.Io.Dir.cwd())) |v| {
+        if (ur.findBuildVersion(g, std.Io.Dir.cwd())) |v| {
             break :blk v;
+        } else |err| {
+            if (err != error.FileNotFound) return err;
         }
         if (try library.latest(g)) |spec| {
             break :blk spec.version;

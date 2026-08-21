@@ -581,12 +581,7 @@ pub fn findBuildVersion(g: Global, dir: std.Io.Dir) !?Version {
         }
     }
 
-    var parent = dir.openDir(g.init.io, "..", .{}) catch |err| {
-        if (err != error.FileNotFound) {
-            return err;
-        }
-        return null;
-    };
+    var parent = try dir.openDir(g.init.io, "..", .{});
     defer parent.close(g.init.io);
     var dir_buf = std.mem.zeroes([std.fs.max_path_bytes]u8);
     var parent_buf = std.mem.zeroes([std.fs.max_path_bytes]u8);
