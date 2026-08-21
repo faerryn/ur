@@ -22,12 +22,20 @@ fn start(g: ur.Global) !void {
     defer library.deinit(g);
 
     var index = ur.RemoteIndex.init(g);
-    try index.fetch_remote_index(g, .Zig, "https://ziglang.org/download/index.json");
-    try index.fetch_remote_index(g, .Zls, "https://builds.zigtools.org/index.json");
-    defer index.deinit();
+    try index.request_remote_index(g, .Zig, "https://ziglang.org/download/index.json");
+    try index.request_remote_index(g, .Zls, "https://builds.zigtools.org/index.json");
+    defer index.deinit(g);
 
-    const default_version =
-        if (try ur.findBuildVersion(g, std.Io.Dir.cwd())) |v| v else if (index.defaultRemoteSpec()) |spec| spec.version else null;
+    const default_version =  blk: {
+        if (try ur.findBuildVersion(g, std.Io.Dir.cwd())) |v| {
+            break :blk v;
+        }
+        if (try library.latest(g)) |spec| {
+            break :blk spec.version;
+        }
+        break :blk null;
+    };
+
     const spec_opts = ur.SpecParseOptions{ .infer_target = ur.Target.NATIVE, .infer_version = default_version };
     const target_opts = ur.TargetParseOptions{ .infer_cpu = ur.Target.NATIVE.cpu, .infer_os = ur.Target.NATIVE.os };
     if (ur.Spec.parse(args[0], spec_opts, target_opts)) |spec| {
@@ -96,6 +104,7 @@ fn subcommand_list(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex, a
     };
     switch (subcommand) {
         .all, .available => {
+            try index.fetch_all(g);
             var it = index.content.iterator();
             while (it.next()) |kv| {
                 if (subcommand == .all or kv.key_ptr.target.isNative())
@@ -171,6 +180,7 @@ fn subcommand_uninstall(g: ur.Global, library: *ur.Library, args: []const [:0]co
 fn ensure_installed(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex, spec: ur.Spec) !void {
     if (try library.isInstalled(g, spec)) return;
 
+    try index.fetch_all(g);
     const remote_tarball = index.content.get(spec) orelse {
         try g.tio.err.print("Error: {f} version '{f}' does not exist or not support architecture '{f}'\n", .{ spec.product, spec.version, spec.target });
         return;

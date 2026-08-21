@@ -224,36 +224,37 @@ pub const RemoteIndexContent = std.AutoHashMap(Spec, RemoteTarball);
 
 pub const RemoteIndex = struct {
     content: RemoteIndexContent,
+    work_queue: std.ArrayList(Work),
+
+    const Work = struct {
+        product: Product,
+        url: []const u8,
+    };
 
     pub fn init(g: Global) @This() {
         return .{
             .content = RemoteIndexContent.init(g.init.gpa),
+            .work_queue = .empty,
         };
     }
 
-    pub fn deinit(self: *@This()) void {
+    pub fn deinit(self: *@This(), g: Global) void {
         self.content.deinit();
+        self.work_queue.deinit(g.init.gpa);
     }
 
-    // Returns null if content is empty (should be unlikely)
-    pub fn defaultRemoteSpec(self: @This()) ?Spec {
-        var candidate: ?Spec = null;
-        var key_iterator = self.content.keyIterator();
-        while (key_iterator.next()) |spec| {
-            if (spec.target.isNative()) {
-                if (candidate) |other| {
-                    if (spec.version.gt(other.version)) {
-                        candidate = spec.*;
-                    }
-                } else {
-                    candidate = spec.*;
-                }
-            }
+    pub fn request_remote_index(self: *@This(), g: Global, product: Product, url: []const u8) !void {
+        try self.work_queue.append(g.init.gpa, .{.product =product, .url=url});
+    }
+
+    pub fn fetch_all(self: *@This(), g: Global) !void {
+        for (self.work_queue.items) |work| {
+            try self.fetch_remote_index(g, work.product, work.url);
         }
-        return candidate;
+        self.work_queue.clearAndFree(g.init.gpa);
     }
 
-    pub fn fetch_remote_index(self: *@This(), g: Global, product: Product, url: []const u8) !void {
+    fn fetch_remote_index(self: *@This(), g: Global, product: Product, url: []const u8) !void {
         var arena = std.heap.ArenaAllocator.init(g.init.gpa);
         defer arena.deinit();
         const allocator = arena.allocator();
@@ -466,26 +467,34 @@ pub const Library = struct {
         }
     }
 
-    // TODO: consider returning errors instead of an option?
+    // Matches text against all installed specs to find a match. Returns null for multiple matches.
     pub fn match(self: @This(), g: Global, text: []const u8) !?Spec {
-        const try_target = Target.parse(text, .{ .infer_cpu = Target.NATIVE.cpu, .infer_os = Target.NATIVE.os }) catch null;
-        const try_version = Version.parse(text) catch null;
-        if (try_target == null and try_version == null) return null;
         var candidate: ?Spec = null;
-
         var it = self.iterate();
         while (try it.next(g)) |spec| {
-            if (try_target) |target| {
-                if (target.eql(spec.target)) {
-                    if (candidate) |_| return null;
+            if (Spec.parse(text, .{.infer_target=spec.target, .infer_product=spec.product, .infer_version=spec.version},
+                .{.infer_os = spec.target.os, .infer_cpu = spec.target.cpu})) |guess| {
+                if (std.meta.eql(spec, guess)) {
+                    if (candidate) |_| return null; // too many candidates
+                    candidate = guess;
+                }
+            } else |_| {}
+        }
+        return candidate;
+    }
+
+    // Finds latest runnable spec
+    pub fn latest(self: @This(), g: Global) !?Spec {
+        var candidate: ?Spec = null;
+        var it = self.iterate();
+        while (try it.next(g)) |spec| {
+            if (!spec.target.isNative()) continue;
+            if (candidate) |other| {
+                if (spec.version.gt(other.version)) {
                     candidate = spec;
                 }
-            }
-            if (try_version) |version| {
-                if (version.eql(spec.version)) {
-                    if (candidate) |_| return null;
-                    candidate = spec;
-                }
+            } else {
+                candidate = spec;
             }
         }
         return candidate;
