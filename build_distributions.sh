@@ -9,7 +9,7 @@ OUT_DIST_DIR="$OUT_DIR/$DIST_DIR"
 
 # Check for existing distributions
 if [ -d "$OUT_DIST_DIR" ]; then
-	printf '%s is not empty!' "$(realpath "$OUT_DIST_DIR")"
+	printf '%s is not empty!\n' "$(realpath "$OUT_DIST_DIR")"
 	exit 1
 fi
 
