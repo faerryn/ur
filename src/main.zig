@@ -5,6 +5,7 @@ const config = @import("config");
 
 pub fn main(init: std.process.Init) void {
     var tio_context = ur.Tio(if (builtin.mode == .Debug) 0 else 4096, 0).init(init.io);
+    // TODO: We probably want to deinitialize this before execv!
     defer tio_context.deinit();
     const tio = tio_context.interface();
 
