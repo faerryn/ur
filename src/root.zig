@@ -345,7 +345,7 @@ fn getAppPath(g: Global, known_folder: known_folders.KnownFolder) ![]const u8 {
         try known_folders.getPath(g.init.io, g.init.gpa, g.init.environ_map, known_folder) orelse return error.NotFound;
     defer g.init.gpa.free(parent_path);
     const sub_path = switch (builtin.os.tag) {
-        .macos => "com.faerryn." ++ config.name,
+        .macos => "com.faerryn." ++ config.name, // TODO: don't hardcode faerryn.com
         else => config.name,
     };
     const path_parts = &[_][]const u8{ parent_path, sub_path };
