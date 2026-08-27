@@ -231,20 +231,17 @@ fn shim(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex, spec: ur.Spe
             var zig_spec_path_buf = std.mem.zeroes([std.fs.max_path_bytes]u8);
             const zig_spec_path_len = try zig_spec_dir.realPath(g.init.io, &zig_spec_path_buf);
             const oldpath = g.init.environ_map.get("PATH") orelse "";
-            var newpath = try g.init.gpa.alloc(u8, oldpath.len + zig_spec_path_len + 1);
+            const newpath = try g.init.gpa.alloc(u8, oldpath.len + zig_spec_path_len + 1);
             errdefer g.init.gpa.free(newpath);
-            // TODO: maybe use sprintf?
-            // std.Io.Writer.fixed(buffer: []u8)
-            std.mem.copyForwards(u8, newpath, zig_spec_path_buf[0..zig_spec_path_len]);
-            newpath[zig_spec_path_len] = std.fs.path.delimiter;
-            std.mem.copyForwards(u8, newpath[zig_spec_path_len + 1 ..], oldpath);
+            var newpath_writer = std.Io.Writer.fixed(newpath);
+            try newpath_writer.print("{s}{c}{s}", .{zig_spec_path_buf[0..zig_spec_path_len], std.fs.path.delimiter, oldpath});
             try g.init.environ_map.put("PATH", newpath);
         } else |_| {}
     }
 
     // Execv will prevent us from using GPA's memory leak detection, so we disable it on Debug
     if (std.process.can_replace and builtin.mode != .Debug) {
-        return std.process.replace(g.init.io, .{ .argv = argv.items, .environ_map = g.init.environ_map });
+        try std.process.replace(g.init.io, .{ .argv = argv.items, .environ_map = g.init.environ_map });
     } else if (std.process.can_spawn) {
         var child = try std.process.spawn(g.init.io, .{ .argv = argv.items, .environ_map = g.init.environ_map });
         const term = try child.wait(g.init.io);
@@ -252,5 +249,5 @@ fn shim(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex, spec: ur.Spe
         if (builtin.mode != .Debug) std.process.exit(term.exited);
     } else {
         @compileError("Error: No shim mechanism available for this target.");
-    }
+     }
 }
