@@ -131,7 +131,6 @@ fn subcommand_install(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex
     const spec = blk: {
         // Check if SPEC is specified
         if (args.len > 1) {
-            // TODO: Infer version somehow
             if (ur.Spec.parse(
                 args[1],
                 .{ .infer_product = .Zig, .infer_target = ur.Target.NATIVE, .infer_version = default_version },
@@ -182,7 +181,6 @@ fn subcommand_uninstall(g: ur.Global, library: *ur.Library, args: []const [:0]co
     try g.tio.out.print("Uninstalled {f} .\n", .{spec});
 }
 
-// TODO: use actual errors here to signify different return states
 fn ensure_installed(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex, spec: ur.Spec) !void {
     if (try library.isInstalled(g, spec)) return;
 
@@ -236,6 +234,7 @@ fn shim(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex, spec: ur.Spe
             var newpath = try g.init.gpa.alloc(u8, oldpath.len + zig_spec_path_len + 1);
             errdefer g.init.gpa.free(newpath);
             // TODO: maybe use sprintf?
+            // std.Io.Writer.fixed(buffer: []u8)
             std.mem.copyForwards(u8, newpath, zig_spec_path_buf[0..zig_spec_path_len]);
             newpath[zig_spec_path_len] = std.fs.path.delimiter;
             std.mem.copyForwards(u8, newpath[zig_spec_path_len + 1 ..], oldpath);
@@ -255,6 +254,3 @@ fn shim(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex, spec: ur.Spe
         @compileError("Error: No shim mechanism available for this target.");
     }
 }
-
-// TODO: Avoid rebuilding library and index too many times. Singletons?
-// TODO: Stick strings into some sort of localization file.

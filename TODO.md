@@ -17,3 +17,4 @@
   - [ ] Size comparison
   - [ ] shasum checksum
   - [ ] minisign
+- [ ] Localization
