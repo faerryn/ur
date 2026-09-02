@@ -2,6 +2,7 @@
 - [ ] Sort the output of list
 - [ ] Handle offline situation
 - [ ] Treat Zig and ZLS versions as semantically separate
+  - [ ] Allow ZLS and Zig patch version to differ
   - [ ] Rework the 'infer' and 'default-ing' mechanisms to be robust
   - [ ] Merge ur.Library and ur.RemoteIndex
 - [ ] Flatten ur.Global
