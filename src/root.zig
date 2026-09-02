@@ -259,7 +259,6 @@ pub const RemoteIndex = struct {
         defer arena.deinit();
         const allocator = arena.allocator();
         const s = try http_get(g, allocator, url);
-        // g.tio.err.print("{s}:\n{s}\n", .{url, s}) catch {};
         const index_value = try std.json.parseFromSliceLeaky(std.json.Value, allocator, s, .{});
 
         var index_it = switch (index_value) {

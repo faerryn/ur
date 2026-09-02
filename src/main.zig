@@ -241,7 +241,7 @@ fn shim(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex, spec: ur.Spe
 
     // Execv will prevent us from using GPA's memory leak detection, so we disable it on Debug
     if (std.process.can_replace and builtin.mode != .Debug) {
-        try std.process.replace(g.init.io, .{ .argv = argv.items, .environ_map = g.init.environ_map });
+        return std.process.replace(g.init.io, .{ .argv = argv.items, .environ_map = g.init.environ_map });
     } else if (std.process.can_spawn) {
         var child = try std.process.spawn(g.init.io, .{ .argv = argv.items, .environ_map = g.init.environ_map });
         const term = try child.wait(g.init.io);
