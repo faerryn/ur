@@ -23,9 +23,9 @@ fn start(g: ur.Global) !void {
     defer library.deinit(g);
 
     var index = ur.RemoteIndex.init(g);
+    defer index.deinit(g);
     try index.request_remote_index(g, .Zig, "https://ziglang.org/download/index.json");
     try index.request_remote_index(g, .Zls, "https://builds.zigtools.org/index.json");
-    defer index.deinit(g);
 
     const default_version = blk: {
         if (ur.findBuildVersion(g, std.Io.Dir.cwd())) |v| {
