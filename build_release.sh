@@ -20,7 +20,7 @@ OUT_DIR="$PWD/zig-out"
 
 OUT_DIST_DIR="$OUT_DIR/$DIST_DIR"
 
-# Compute platforms that zig supports and compile
+# Compile using GNU parallel
 parallel --bar zig build --prefix-exe-dir "$DIST_DIR"/{} --release="$RELEASE_MODE" -Dtarget={} :::: "$BUILD_TARGETS"
 
 # Package binaries into a tarball
