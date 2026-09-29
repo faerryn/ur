@@ -110,7 +110,7 @@ pub const Spec = struct {
         };
     }
 
-    pub fn serialize(self: @This()) [6]u8 {
+    fn serialize(self: @This()) [6]u8 {
         var bytes = std.mem.zeroes([6]u8);
         bytes[0] = @intFromEnum(self.product);
         @memcpy(bytes[1..4], &self.version.parts);
@@ -120,11 +120,10 @@ pub const Spec = struct {
     }
 
 
-    fn lessThanFn(context: @TypeOf({}), lhs: @This(), rhs: @This()) bool {
+    pub fn lessThanFn(context: @TypeOf({}), lhs: @This(), rhs: @This()) bool {
         _ = context;
         return std.mem.order(u8, &lhs.serialize(), &rhs.serialize()) == .lt;
     }
-
 };
 
 pub const Product = enum {
