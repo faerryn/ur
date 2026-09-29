@@ -24,6 +24,7 @@ fn start(g: ur.Global) !void {
 
     var index = ur.RemoteIndex.init(g);
     defer index.deinit(g);
+    // TODO: don't hardcode remote index URLs
     try index.request_remote_index(g, .Zig, "https://ziglang.org/download/index.json");
     try index.request_remote_index(g, .Zls, "https://builds.zigtools.org/index.json");
 
@@ -105,22 +106,31 @@ fn subcommand_list(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex, a
         }
         break :subcommand_block .available;
     };
+
+    var list = std.ArrayList(ur.Spec).empty;
+    defer list.deinit(g.init.gpa);
+
     switch (subcommand) {
         .all, .available => {
             try index.fetch_all(g);
             var it = index.content.iterator();
             while (it.next()) |kv| {
                 if (subcommand == .all or kv.key_ptr.target.isNative())
-                    try g.tio.out.print("{f}\n", .{kv.key_ptr});
+                    try list.append(g.init.gpa, kv.key_ptr.*);
             }
             try g.tio.out.flush();
         },
         .installed => {
             var it = library.iterator();
             while (try it.next(g)) |spec| {
-                try g.tio.out.print("{f}\n", .{spec});
+                try list.append(g.init.gpa, spec);
             }
         },
+    }
+
+    std.mem.sortUnstable(ur.Spec, list.items, {}, ur.Spec.lessThanFn);
+    for (list.items) |spec| {
+        try g.tio.out.print("{f}\n", .{spec});
     }
 }
 

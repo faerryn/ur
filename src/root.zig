@@ -109,6 +109,22 @@ pub const Spec = struct {
             .version = version,
         };
     }
+
+    pub fn serialize(self: @This()) [6]u8 {
+        var bytes = std.mem.zeroes([6]u8);
+        bytes[0] = @intFromEnum(self.product);
+        @memcpy(bytes[1..4], &self.version.parts);
+        bytes[4] = @intFromEnum(self.target.cpu);
+        bytes[5] = @intFromEnum(self.target.os);
+        return bytes;
+    }
+
+
+    fn lessThanFn(context: @TypeOf({}), lhs: @This(), rhs: @This()) bool {
+        _ = context;
+        return std.mem.order(u8, &lhs.serialize(), &rhs.serialize()) == .lt;
+    }
+
 };
 
 pub const Product = enum {

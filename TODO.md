@@ -1,5 +1,5 @@
 # TODO
-- [ ] Sort the output of list
+- [x] Sort the output of list
 - [ ] Handle offline situation
 - [ ] Treat Zig and ZLS versions as semantically separate
   - [ ] Allow ZLS and Zig patch version to differ
