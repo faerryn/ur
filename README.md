@@ -54,4 +54,6 @@ ln -s ur "$HOME/.local/bin/zig"
 
 A ziggurat, probably not written in Zig.
 
-<img width="3366" height="1468" alt="image" src="https://github.com/user-attachments/assets/9e64e9b4-be0a-49b2-854c-68197bcae7b8" />
+<img width="3366" height="1468" alt="ziggurat of ur" src="https://upload.wikimedia.org/wikipedia/commons/6/6b/Ziggarat_of_Ur_001.jpg" />
+
+By Tla2006 at English Wikipedia - Transferred from en.wikipedia to Commons., Public Domain, https://commons.wikimedia.org/w/index.php?curid=1974623
