@@ -112,7 +112,13 @@ fn subcommand_list(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex, a
 
     switch (subcommand) {
         .all, .available => {
-            try index.fetch_all(g);
+            index.fetch_all(g) catch |err| {
+                if (err == error.NameServerFailure) {
+                    try g.tio.err.print("Error: no internet access.\n", .{});
+                    return;
+                }
+                return err;
+            };
             var it = index.content.iterator();
             while (it.next()) |kv| {
                 if (subcommand == .all or kv.key_ptr.target.isNative())
@@ -135,7 +141,13 @@ fn subcommand_list(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex, a
 }
 
 fn subcommand_install(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex, args: []const [:0]const u8) !void {
-    try index.fetch_all(g);
+    index.fetch_all(g) catch |err| {
+        if (err == error.NameServerFailure) {
+            try g.tio.err.print("Error: no internet access.\n", .{});
+            return;
+        }
+        return err;
+    };
     const default_version = if (index.latest_native()) |spec| spec.version else null;
     // const default_version = index.lastest
     const spec = blk: {
@@ -148,7 +160,7 @@ fn subcommand_install(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex
             )) |spec| {
                 break :blk spec;
             } else |_| {}
-            try g.tio.err.print("Error: could not parse '{s}'\n", .{args[1]});
+            try g.tio.err.print("Error: could not parse '{s}'.\n", .{args[1]});
             return;
         }
         if (default_version) |version| {
@@ -160,7 +172,7 @@ fn subcommand_install(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex
             };
         }
         // Somehow there is nothing!
-        try g.tio.out.print("There does not seem to be a native version of zig for your architecture. You may try installing foreign architectures and running them with emulation.\n", .{});
+        try g.tio.out.print("There does not seem to be a native version of zig for your system. You may be able to install a foreign version and run it using emulation.\n", .{});
         return;
     };
 
