@@ -114,7 +114,7 @@ fn subcommand_list(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex, a
         .all, .available => {
             index.fetch_all(g) catch |err| {
                 if (err == error.NameServerFailure) {
-                    try g.tio.err.print("Error: no internet access.\n", .{});
+                    g.tio.err.print("Error: no internet access.\n", .{}) catch {};
                     return;
                 }
                 return err;
@@ -143,7 +143,7 @@ fn subcommand_list(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex, a
 fn subcommand_install(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex, args: []const [:0]const u8) !void {
     index.fetch_all(g) catch |err| {
         if (err == error.NameServerFailure) {
-            try g.tio.err.print("Error: no internet access.\n", .{});
+            g.tio.err.print("Error: no internet access.\n", .{}) catch {};
             return;
         }
         return err;
@@ -160,7 +160,7 @@ fn subcommand_install(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex
             )) |spec| {
                 break :blk spec;
             } else |_| {}
-            try g.tio.err.print("Error: could not parse '{s}'.\n", .{args[1]});
+            g.tio.err.print("Error: could not parse '{s}'.\n", .{args[1]}) catch {};
             return;
         }
         if (default_version) |version| {
@@ -177,7 +177,7 @@ fn subcommand_install(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex
     };
 
     if (try library.isInstalled(g, spec)) {
-        try g.tio.err.print("Error: {f} is already installed.\n", .{spec});
+        g.tio.err.print("Error: {f} is already installed.\n", .{spec}) catch {};
         return;
     }
     try ensure_installed(g, library, index, spec);
@@ -192,7 +192,7 @@ fn subcommand_uninstall(g: ur.Global, library: *ur.Library, args: []const [:0]co
             } else |_| {}
             // Check if args[1] is a version or target of something installed
             if (try library.match(g, args[1])) |spec| break :spec_block spec;
-            try g.tio.err.print("Error: could not parse '{s}'\n", .{args[1]});
+            g.tio.err.print("Error: could not parse '{s}'\n", .{args[1]}) catch {};
         }
         try subcommand_help(g);
         return;
@@ -208,7 +208,7 @@ fn ensure_installed(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex, 
 
     try index.fetch_all(g);
     const remote_tarball = index.content.get(spec) orelse {
-        try g.tio.err.print("Error: {f} version '{f}' does not exist or not support architecture '{f}'\n", .{ spec.product, spec.version, spec.target });
+        g.tio.err.print("Error: {f} version '{f}' does not exist or not support architecture '{f}'\n", .{ spec.product, spec.version, spec.target }) catch {};
         return;
     };
     try g.tio.out.print("Starting to install {f} .\n", .{spec});
@@ -258,7 +258,9 @@ fn shim(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex, spec: ur.Spe
             var newpath_writer = std.Io.Writer.fixed(newpath);
             try newpath_writer.print("{s}{c}{s}", .{zig_spec_path_buf[0..zig_spec_path_len], std.fs.path.delimiter, oldpath});
             try g.init.environ_map.put("PATH", newpath);
-        } else |_| {}
+        } else |_| {
+            g.tio.err.print("Failed to find {f} required by {f}.\n", .{spec_zig, spec}) catch {};
+        }
     }
 
     // Execv will prevent us from using GPA's memory leak detection, so we disable it during debug
