@@ -604,7 +604,6 @@ pub fn findBuildVersion(g: Global, dir: std.Io.Dir) !?Version {
         const arena = arena_allocator.allocator();
 
         if (std.zon.parse.fromSlice(struct { minimum_zig_version: []const u8 }, .{ .gpa = g.init.gpa, .arena = arena, .source = source, .diagnostics = &diagnostics, .ignore_unknown_fields = true })) |zon| {
-            defer g.init.gpa.free(zon.minimum_zig_version);
             if (Version.parse(zon.minimum_zig_version)) |version| {
                 return version;
             } else |_| {}
