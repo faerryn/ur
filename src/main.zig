@@ -4,7 +4,7 @@ const ur = @import("ur");
 const config = @import("config");
 
 pub fn main(init: std.process.Init) void {
-    var tio_context = ur.Tio(if (builtin.mode == .Debug) 0 else 4096, 0).init(init.io);
+    var tio_context = ur.Tio(if (builtin.mode == .debug) 0 else 4096, 0).init(init.io);
     // TODO: We probably want to deinitialize this before execv!
     defer tio_context.deinit();
     const tio = tio_context.interface();
@@ -261,14 +261,14 @@ fn shim(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex, spec: ur.Spe
         } else |_| {}
     }
 
-    // Execv will prevent us from using GPA's memory leak detection, so we disable it on Debug
-    if (std.process.can_replace and builtin.mode != .Debug) {
+    // Execv will prevent us from using GPA's memory leak detection, so we disable it during debug
+    if (std.process.can_replace and builtin.mode != .debug) {
         return std.process.replace(g.init.io, .{ .argv = argv.items, .environ_map = g.init.environ_map });
     } else if (std.process.can_spawn) {
         var child = try std.process.spawn(g.init.io, .{ .argv = argv.items, .environ_map = g.init.environ_map });
         const term = try child.wait(g.init.io);
         // Exit on release with the appropriate exit code
-        if (builtin.mode != .Debug) std.process.exit(term.exited);
+        if (builtin.mode != .debug) std.process.exit(term.exited);
     } else {
         @compileError("Error: No shim mechanism available for this target.");
      }

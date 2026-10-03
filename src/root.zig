@@ -270,11 +270,11 @@ pub const RemoteIndex = struct {
     }
 
     fn fetch_remote_index(self: *@This(), g: Global, product: Product, url: []const u8) !void {
-        var arena = std.heap.ArenaAllocator.init(g.init.gpa);
-        defer arena.deinit();
-        const allocator = arena.allocator();
-        const s = try http_get(g, allocator, url);
-        const index_value = try std.json.parseFromSliceLeaky(std.json.Value, allocator, s, .{});
+        var arena_allocator = std.heap.ArenaAllocator.init(g.init.gpa);
+        defer arena_allocator.deinit();
+        const arena = arena_allocator.allocator();
+        const s = try http_get(g, arena, url);
+        const index_value = try std.json.parseFromSliceLeaky(std.json.Value, arena, s, .{});
 
         var index_it = switch (index_value) {
             .object => |value| value.iterator(),
@@ -290,7 +290,7 @@ pub const RemoteIndex = struct {
                     if (err == ParseError.Malformed) continue else return err;
                 };
                 const spec = Spec{ .product = product, .version = version, .target = target };
-                const remote_tarball = std.json.parseFromValueLeaky(RemoteTarball, allocator, kv.value_ptr.*, .{}) catch |err|
+                const remote_tarball = std.json.parseFromValueLeaky(RemoteTarball, arena, kv.value_ptr.*, .{}) catch |err|
                     {
                         if (err == error.DuplicateField or err == error.UnknownField or
                             err == error.MissingField or err == error.LengthMismatch or
@@ -597,7 +597,13 @@ pub fn findBuildVersion(g: Global, dir: std.Io.Dir) !?Version {
         _ = try reader.interface.streamRemaining(&writer.writer);
         const source = try writer.toOwnedSliceSentinel(0);
         defer g.init.gpa.free(source);
-        if (std.zon.parse.fromSliceAlloc(struct { minimum_zig_version: []const u8 }, g.init.gpa, source, null, .{ .ignore_unknown_fields = true })) |zon| {
+        var diagnostics: std.zon.parse.Diagnostics = undefined;
+
+        var arena_allocator = std.heap.ArenaAllocator.init(g.init.gpa);
+        defer arena_allocator.deinit();
+        const arena = arena_allocator.allocator();
+
+        if (std.zon.parse.fromSlice(struct { minimum_zig_version: []const u8 }, .{ .gpa = g.init.gpa, .arena = arena, .source = source, .diagnostics = &diagnostics, .ignore_unknown_fields = true })) |zon| {
             defer g.init.gpa.free(zon.minimum_zig_version);
             if (Version.parse(zon.minimum_zig_version)) |version| {
                 return version;
