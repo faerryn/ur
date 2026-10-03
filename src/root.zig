@@ -112,10 +112,10 @@ pub const Spec = struct {
 
     fn serialize(self: @This()) [6]u8 {
         var bytes = std.mem.zeroes([6]u8);
-        bytes[0] = @intFromEnum(self.product);
+        bytes[0] = @backingInt(self.product);
         @memcpy(bytes[1..4], &self.version.parts);
-        bytes[4] = @intFromEnum(self.target.cpu);
-        bytes[5] = @intFromEnum(self.target.os);
+        bytes[4] = @backingInt(self.target.cpu);
+        bytes[5] = @backingInt(self.target.os);
         return bytes;
     }
 
