@@ -79,8 +79,8 @@ fn subcommand_help(g: ur.Global) !void {
         \\
         \\Commands:
         \\  help                    Display this help message.
-        \\  install (SPEC)?         Install SPEC.
-        \\  uninstall [SPEC]        Uninstall SPEC
+        \\  install [SPEC]...       Install SPEC.
+        \\  uninstall [SPEC]...     Uninstall SPEC
         \\  list (all|installed)?   List versions for your architecture, or all versions, or just the ones installed.
         \\  (SPEC)? [<ARGS>]        Run program specified by SPEC, passing [<ARGS>].
         \\  version                 Print the version of {s}.
@@ -149,77 +149,72 @@ fn subcommand_install(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex
         return err;
     };
     const default_version = if (index.latest_native()) |spec| spec.version else null;
-    // const default_version = index.lastest
-    const spec = blk: {
-        // Check if SPEC is specified
-        if (args.len > 1) {
+    var specs = std.ArrayList(ur.Spec).empty;
+    defer specs.deinit(g.init.gpa);
+
+    // Check if SPEC is specified
+    if (args.len > 1) {
+        for (args[1..]) |arg| {
             if (ur.Spec.parse(
-                args[1],
-                .{ .infer_product = .Zig, .infer_target = ur.Target.NATIVE, .infer_version = default_version },
-                .{ .infer_cpu = ur.Target.NATIVE.cpu, .infer_os = ur.Target.NATIVE.os },
+                    arg,
+                    .{ .infer_product = .Zig, .infer_target = ur.Target.NATIVE, .infer_version = default_version },
+                    .{ .infer_cpu = ur.Target.NATIVE.cpu, .infer_os = ur.Target.NATIVE.os },
             )) |spec| {
-                break :blk spec;
-            } else |_| {}
-            g.tio.err.print("Error: could not parse '{s}'.\n", .{args[1]}) catch {};
-            return;
+                try specs.append(g.init.gpa, spec);
+            } else |_| {
+                g.tio.err.print("Error: could not parse '{s}'.\n", .{args[1]}) catch {};
+            }
         }
-        if (default_version) |version| {
-            // Use default version if available
-            break :blk ur.Spec{
-                .product = .Zig,
-                .target = ur.Target.NATIVE,
-                .version = version,
-            };
-        }
+    } else if (default_version) |version| {
+        // Use default version if available
+        try specs.append(g.init.gpa, ur.Spec{
+            .product = .Zig,
+            .target = ur.Target.NATIVE,
+            .version = version,
+        });
+    } else {
         // Somehow there is nothing!
         try g.tio.out.print("There does not seem to be a native version of zig for your system. You may be able to install a foreign version and run it using emulation.\n", .{});
-        return;
-    };
-
-    if (try library.isInstalled(g, spec)) {
-        g.tio.err.print("Error: {f} is already installed.\n", .{spec}) catch {};
-        return;
     }
-    try ensure_installed(g, library, index, spec);
+
+    for (specs.items) |spec| {
+        if (try library.isInstalled(g, spec)) {
+            g.tio.out.print("{f} is already installed, skipping.\n", .{spec}) catch {};
+        } else {
+            try install_spec(g, library, index, spec);
+        }
+    }
 }
 
 fn subcommand_uninstall(g: ur.Global, library: *ur.Library, args: []const [:0]const u8) !void {
-    const spec = spec_block: {
-        // Try to parse SPEC
-        if (args.len > 1) {
-            if (ur.Spec.parse(args[1], .{ .infer_product = .Zig, .infer_target = ur.Target.NATIVE }, .{ .infer_cpu = ur.Target.NATIVE.cpu, .infer_os = ur.Target.NATIVE.os })) |spec| {
-                if (try library.isInstalled(g, spec)) break :spec_block spec;
-            } else |_| {}
-            // Check if args[1] is a version or target of something installed
-            if (try library.match(g, args[1])) |spec| break :spec_block spec;
-            g.tio.err.print("Error: could not parse '{s}'\n", .{args[1]}) catch {};
+    var specs = std.ArrayList(ur.Spec).empty;
+    defer specs.deinit(g.init.gpa);
+
+    // Try to parse SPEC
+    if (args.len > 1) {
+        for (args[1..]) |arg| {
+            if (try library.match(g, args[1])) |spec| {
+                try specs.append(g.init.gpa, spec);
+            } else {
+                g.tio.err.print("{s} is not installed, skipping\n", .{arg}) catch {};
+            }
         }
+    } else {
         try subcommand_help(g);
         return;
-    };
+    }
 
     var buffer = std.mem.zeroes([std.fs.max_name_bytes]u8);
-    try library.data_dir.deleteTree(g.init.io, try spec.buffered(&buffer));
-    try g.tio.out.print("Uninstalled {f} .\n", .{spec});
-}
-
-fn ensure_installed(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex, spec: ur.Spec) !void {
-    if (try library.isInstalled(g, spec)) return;
-
-    try index.fetch_all(g);
-    const remote_tarball = index.content.get(spec) orelse {
-        g.tio.err.print("Error: {f} version '{f}' does not exist or not support architecture '{f}'\n", .{ spec.product, spec.version, spec.target }) catch {};
-        return;
-    };
-    try g.tio.out.print("Starting to install {f} .\n", .{spec});
-    try g.tio.out.flush();
-
-    try library.installRemoteTarball(g, spec, remote_tarball);
-    try g.tio.out.print("Finished installing {f} .\n", .{spec});
+    for (specs.items) |spec| {
+        try library.data_dir.deleteTree(g.init.io, try spec.buffered(&buffer));
+        try g.tio.out.print("Uninstalled {f} .\n", .{spec});
+    }
 }
 
 fn shim(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex, spec: ur.Spec, args: []const [:0]const u8) !void {
-    try ensure_installed(g, library, index, spec);
+    if (!try library.isInstalled(g, spec)) {
+        try install_spec(g, library, index, spec);
+    }
     var spec_dir = try library.openSpecDir(g, spec, .{});
     defer spec_dir.close(g.init.io);
 
@@ -237,7 +232,7 @@ fn shim(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex, spec: ur.Spe
     const exe_path = try std.fs.path.join(g.init.gpa, &[_][]const u8{ spec_dir_path[0..spec_dir_path_len], exe_name });
     defer g.init.gpa.free(exe_path);
 
-    var argv: std.ArrayList([]const u8) = .empty;
+    var argv = std.ArrayList([]const u8).empty;
     defer argv.deinit(g.init.gpa);
     try argv.append(g.init.gpa, exe_path);
     for (args) |arg| {
@@ -273,5 +268,21 @@ fn shim(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex, spec: ur.Spe
         if (builtin.mode != .debug) std.process.exit(term.exited);
     } else {
         @compileError("Error: No shim mechanism available for this target.");
-     }
+    }
 }
+
+fn install_spec(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex, spec: ur.Spec) !void {
+    if (try library.isInstalled(g, spec)) return;
+
+    try index.fetch_all(g);
+    const remote_tarball = index.content.get(spec) orelse {
+        g.tio.err.print("Error: {f} version '{f}' does not exist or not support architecture '{f}'\n", .{ spec.product, spec.version, spec.target }) catch {};
+        return;
+    };
+    try g.tio.out.print("Starting to install {f} .\n", .{spec});
+    try g.tio.out.flush();
+
+    try library.installRemoteTarball(g, spec, remote_tarball);
+    try g.tio.out.print("Finished installing {f} .\n", .{spec});
+}
+
