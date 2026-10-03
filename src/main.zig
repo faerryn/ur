@@ -156,9 +156,9 @@ fn subcommand_install(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex
     if (args.len > 1) {
         for (args[1..]) |arg| {
             if (ur.Spec.parse(
-                    arg,
-                    .{ .infer_product = .Zig, .infer_target = ur.Target.NATIVE, .infer_version = default_version },
-                    .{ .infer_cpu = ur.Target.NATIVE.cpu, .infer_os = ur.Target.NATIVE.os },
+                arg,
+                .{ .infer_product = .Zig, .infer_target = ur.Target.NATIVE, .infer_version = default_version },
+                .{ .infer_cpu = ur.Target.NATIVE.cpu, .infer_os = ur.Target.NATIVE.os },
             )) |spec| {
                 try specs.append(g.init.gpa, spec);
             } else |_| {
@@ -251,10 +251,10 @@ fn shim(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex, spec: ur.Spe
             const newpath = try g.init.gpa.alloc(u8, oldpath.len + zig_spec_path_len + 1);
             errdefer g.init.gpa.free(newpath);
             var newpath_writer = std.Io.Writer.fixed(newpath);
-            try newpath_writer.print("{s}{c}{s}", .{zig_spec_path_buf[0..zig_spec_path_len], std.fs.path.delimiter, oldpath});
+            try newpath_writer.print("{s}{c}{s}", .{ zig_spec_path_buf[0..zig_spec_path_len], std.fs.path.delimiter, oldpath });
             try g.init.environ_map.put("PATH", newpath);
         } else |_| {
-            g.tio.err.print("Failed to find {f} required by {f}.\n", .{spec_zig, spec}) catch {};
+            g.tio.err.print("Failed to find {f} required by {f}.\n", .{ spec_zig, spec }) catch {};
         }
     }
 
@@ -285,4 +285,3 @@ fn install_spec(g: ur.Global, library: *ur.Library, index: *ur.RemoteIndex, spec
     try library.installRemoteTarball(g, spec, remote_tarball);
     try g.tio.out.print("Finished installing {f} .\n", .{spec});
 }
-

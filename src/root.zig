@@ -119,7 +119,6 @@ pub const Spec = struct {
         return bytes;
     }
 
-
     pub fn lessThanFn(context: @TypeOf({}), lhs: @This(), rhs: @This()) bool {
         _ = context;
         return std.mem.order(u8, &lhs.serialize(), &rhs.serialize()) == .lt;
